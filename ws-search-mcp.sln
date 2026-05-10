@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ws-search-mcp", "ws-search-mcp.csproj", "{A5718375-79C7-1040-C5CF-9FA267129591}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WsSearchMcp.Tests", "tests\WsSearchMcp.Tests\WsSearchMcp.Tests.csproj", "{B7A1C3E2-4D32-4A7A-9CDB-6F2E4B8F9A1D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A5718375-79C7-1040-C5CF-9FA267129591}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A5718375-79C7-1040-C5CF-9FA267129591}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A5718375-79C7-1040-C5CF-9FA267129591}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A5718375-79C7-1040-C5CF-9FA267129591}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B7A1C3E2-4D32-4A7A-9CDB-6F2E4B8F9A1D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B7A1C3E2-4D32-4A7A-9CDB-6F2E4B8F9A1D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B7A1C3E2-4D32-4A7A-9CDB-6F2E4B8F9A1D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B7A1C3E2-4D32-4A7A-9CDB-6F2E4B8F9A1D}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {8B0626DC-FD2F-41BB-B279-A98F166D8999}
+	EndGlobalSection
+EndGlobal

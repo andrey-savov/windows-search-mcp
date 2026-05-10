@@ -1,0 +1,21 @@
+# Build output
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+
+# IDE
+*.user
+*.suo
+.vs/
+.vscode/
+
+# Logs / artifacts that have leaked into the tree before
+build-log.txt
+preprocess.*.xml
+*.binlog
+
+# OS
+Thumbs.db
+.DS_Store

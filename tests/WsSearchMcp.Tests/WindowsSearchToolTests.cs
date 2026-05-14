@@ -39,7 +39,7 @@ namespace WsSearchMcp.Tests
         public void BuildSql_ContainsModeAlsoMatchesFilename()
         {
             var (sql, _, cols) = WindowsSearchTool.BuildSql("gastro", null, 5, "contains", null);
-            Assert.Contains("CONTAINS('gastro')", sql);
+            Assert.Contains("CONTAINS('\"gastro\"')", sql);
             Assert.Contains("System.FileName LIKE '%gastro%'", sql);
         }
 

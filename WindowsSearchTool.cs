@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace WsSearchMcp;
@@ -55,7 +56,7 @@ public static class WindowsSearchTool
         string? scope,
         int maxResults,
         string mode,
-        string[]? properties,
+        string[]? columns,
         SearchFilter[]? filters = null,
         string? orderBy = null,
         string? orderDir = null)
@@ -64,9 +65,9 @@ public static class WindowsSearchTool
         if (maxResults > 1000) maxResults = 1000;
 
         var cols = new List<string> { "System.ItemPathDisplay" };
-        if (properties is not null)
+        if (columns is not null)
         {
-            foreach (var p in properties)
+            foreach (var p in columns)
             {
                 if (string.IsNullOrWhiteSpace(p)) continue;
                 if (!cols.Contains(p, StringComparer.OrdinalIgnoreCase))
@@ -115,7 +116,7 @@ public static class WindowsSearchTool
     private static string BuildQueryClause(string query, string mode) =>
         mode.ToLowerInvariant() switch
         {
-            "contains" => $"(CONTAINS('{EscapeSqlLiteral(query)}') OR System.FileName LIKE '%{EscapeSqlLiteral(query)}%')",
+            "contains" => "(CONTAINS('\"" + EscapeSqlLiteral(query) + "\"') OR System.FileName LIKE '%" + EscapeSqlLiteral(query) + "%')",
             "filename" => $"System.FileName LIKE '%{EscapeSqlLiteral(query)}%'",
             "raw" => query,
             _ => throw new ArgumentException(
@@ -240,7 +241,7 @@ public static class WindowsSearchTool
         return JsonSerializer.Serialize(matches);
     }
 
-    [McpServerTool]
+    [McpServerTool(Name = "query")]
     [Description(
         "Search the local Windows Search index (SYSTEMINDEX) via ADODB + Search.CollatorDSO. " +
         "Supports full-text queries, filename matching, structured filters on any indexed " +
@@ -248,19 +249,19 @@ public static class WindowsSearchTool
         "JSON array of matching items with their requested indexed properties.")]
     public static string Search(
         [Description(
-            "Optional search query. With mode='contains' (default), matches a CONTAINS() full-text " +
-            "argument OR a filename LIKE '%query%' (so name-only hits aren't missed). " +
-            "With mode='filename', only filename LIKE '%query%'. " +
+            "Search query. With mode='contains' (default), matches a CONTAINS() full-text " +
+            "argument OR a filename LIKE '%text%' (so name-only hits aren't missed). " +
+            "With mode='filename', only filename LIKE '%text%'. " +
             "With mode='raw', used verbatim as the WHERE clause (caller is responsible for valid " +
-            "AQS / SQL). Omit to search by 'filters' alone.")]
-            string? query = null,
+            "AQS / SQL). Pass '' to search by 'filters' alone.")]
+            string text,
         [Description(
             "Optional directory to limit the search to (e.g. 'C:\\\\Users\\\\me\\\\Documents'). " +
             "Defaults to the user profile directory. Pass '' to search the entire index.")]
             string? scope = null,
         [Description("Maximum number of results to return. Clamped to [1, 1000]. Default 50.")]
             int maxResults = 50,
-        [Description("Match mode for 'query'. One of: 'contains' (default), 'filename', 'raw'.")]
+        [Description("Match mode for 'text'. One of: 'contains' (default), 'filename', 'raw'.")]
             string mode = "contains",
         [Description(
             "Additional System.* property names to include in each result row. " +
@@ -280,9 +281,9 @@ public static class WindowsSearchTool
             "System.Search.*, System.Link.*, System.AppUserModel.*, System.Devices.*. " +
             "Use the list_properties_by_family or list_properties tools to discover the exact " +
             "names available on this machine.")]
-            string[]? properties = null,
+            string[]? columns = null,
         [Description(
-            "Structured filters AND-combined with 'query'. Each filter targets one System.* property " +
+            "Structured filters AND-combined with 'text'. Each filter targets one System.* property " +
             "with an operator and value. Use for date ranges, size limits, EXIF metadata, etc. " +
             "Examples: filter by modified-after with property='System.DateModified', op='>=', " +
             "value='2024-01-01', valueType='text'; or by camera with property='System.Photo.CameraModel', " +
@@ -293,7 +294,28 @@ public static class WindowsSearchTool
         [Description("Sort direction when 'orderBy' is set: 'ASC' (default) or 'DESC'.")]
             string? orderDir = null)
     {
-        var (sql, _, cols) = BuildSql(query, scope, maxResults, mode, properties, filters, orderBy, orderDir);
+        // Always fetch System.ItemUrl so we can recover the path for DP:// symlink entries
+        // where System.ItemPathDisplay is empty.
+        const string itemUrl = "System.ItemUrl";
+        var fetchUrl = columns is null || !columns.Contains(itemUrl, StringComparer.OrdinalIgnoreCase);
+        if (fetchUrl)
+        {
+            var extra = new string[( columns?.Length ?? 0) + 1];
+            columns?.CopyTo(extra, 0);
+            extra[extra.Length - 1] = itemUrl;
+            columns = extra;
+        }
+
+        string sql;
+        List<string> cols;
+        try
+        {
+            (sql, _, cols) = BuildSql(text, scope, maxResults, mode, columns, filters, orderBy, orderDir);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new McpException(ex.Message, ex);
+        }
 
         var connType = Type.GetTypeFromProgID("ADODB.Connection")
             ?? throw new InvalidOperationException(
@@ -315,6 +337,20 @@ public static class WindowsSearchTool
                         try { row[col] = rs.Fields.Item[col].Value; }
                         catch { row[col] = null; }
                     }
+
+                    // If ItemPathDisplay is empty, recover it from a DP:// ItemUrl.
+                    if (row.TryGetValue("System.ItemPathDisplay", out var display) &&
+                        display is null or "" &&
+                        row.TryGetValue(itemUrl, out var urlVal) &&
+                        urlVal is string urlStr &&
+                        urlStr.StartsWith("DP://", StringComparison.OrdinalIgnoreCase))
+                    {
+                        row["System.ItemPathDisplay"] = ExtractPathFromDpUrl(urlStr);
+                    }
+
+                    // Remove the internally-added ItemUrl column from output.
+                    if (fetchUrl) row.Remove(itemUrl);
+
                     rows.Add(row);
                     rs.MoveNext();
                 }
@@ -329,5 +365,23 @@ public static class WindowsSearchTool
         {
             try { conn.Close(); } catch { /* best-effort */ }
         }
+    }
+
+    // DP://{SID}/X:/path/to/file#fragment  →  X:\path\to\file
+    private static string? ExtractPathFromDpUrl(string url)
+    {
+        // Skip "DP://"
+        var rest = url.AsSpan(5);
+        // Skip "{...}/" SID segment if present
+        if (rest.StartsWith("{".AsSpan(), StringComparison.Ordinal))
+        {
+            var close = rest.IndexOf('}');
+            if (close >= 0) rest = rest[(close + 1)..].TrimStart('/');
+        }
+        // Strip trailing "#fragment"
+        var hash = rest.LastIndexOf('#');
+        if (hash >= 0) rest = rest[..hash];
+        if (rest.IsEmpty) return null;
+        return rest.ToString().Replace('/', '\\');
     }
 }

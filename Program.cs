@@ -20,15 +20,15 @@ if (toolIndex >= 0 && toolIndex + 1 < args.Length)
     {
         result = toolName switch
         {
-            "query" => WindowsSearchTool.Search(
+            "find_files" => WindowsSearchTool.Search(
                 text:       root.TryGetProperty("text",       out var q)   ? (q.GetString() ?? "")                                   : "",
-                scope:      root.TryGetProperty("scope",      out var sc)  ? sc.GetString()                                           : null,
+                scope:      root.TryGetProperty("scope",      out var sc)  ? (sc.GetString() ?? "<UNSET>")                            : "<UNSET>",
                 maxResults: root.TryGetProperty("maxResults", out var mr)  ? mr.GetInt32()                                            : 50,
                 mode:       root.TryGetProperty("mode",       out var mo)  ? (mo.GetString() ?? "contains")                          : "contains",
-                columns:    root.TryGetProperty("columns",    out var co)  ? co.Deserialize<string[]>()                               : null,
-                filters:    root.TryGetProperty("filters",    out var fi)  ? fi.Deserialize<SearchFilter[]>()                         : null,
-                orderBy:    root.TryGetProperty("orderBy",    out var ob)  ? ob.GetString()                                           : null,
-                orderDir:   root.TryGetProperty("orderDir",   out var od)  ? od.GetString()                                           : null),
+                columns:    root.TryGetProperty("columns",    out var co)  ? (co.GetString() ?? "")                                   : "",
+                filters:    root.TryGetProperty("filters",    out var fi)  ? (fi.GetString() ?? "")                                   : "",
+                orderBy:    root.TryGetProperty("orderBy",    out var ob)  ? (ob.GetString() ?? "")                                   : "",
+                orderDir:   root.TryGetProperty("orderDir",   out var od)  ? (od.GetString() ?? "ASC")                                : "ASC"),
 
             "list_properties" => WindowsSearchTool.ListProperties(
                 filter:     root.TryGetProperty("filter",     out var f)   ? f.GetString()                                            : null,

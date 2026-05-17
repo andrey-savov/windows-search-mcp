@@ -241,76 +241,48 @@ public static class WindowsSearchTool
         return JsonSerializer.Serialize(matches);
     }
 
-    [McpServerTool(Name = "query")]
-    [Description(
-        "Search the local Windows Search index (SYSTEMINDEX) via ADODB + Search.CollatorDSO. " +
-        "Supports full-text queries, filename matching, structured filters on any indexed " +
-        "System.* property (dates, sizes, EXIF, music metadata, etc.), and ordering. Returns a " +
-        "JSON array of matching items with their requested indexed properties.")]
+    [McpServerTool(Name = "find_files")]
+    [Description("Search the Windows Search index. Returns a JSON array of matching file paths.")]
     public static string Search(
-        [Description(
-            "Search query. With mode='contains' (default), matches a CONTAINS() full-text " +
-            "argument OR a filename LIKE '%text%' (so name-only hits aren't missed). " +
-            "With mode='filename', only filename LIKE '%text%'. " +
-            "With mode='raw', used verbatim as the WHERE clause (caller is responsible for valid " +
-            "AQS / SQL). Pass '' to search by 'filters' alone.")]
+        [Description("Full-text search term (e.g. 'Erin Dawn'). Pass empty string to search by 'filters' only.")]
             string text,
-        [Description(
-            "Optional directory to limit the search to (e.g. 'C:\\\\Users\\\\me\\\\Documents'). " +
-            "Defaults to the user profile directory. Pass '' to search the entire index.")]
-            string? scope = null,
-        [Description("Maximum number of results to return. Clamped to [1, 1000]. Default 50.")]
+        [Description("Directory scope. Defaults to user profile. Pass empty string to search the entire index.")]
+            string scope = "<UNSET>",
+        [Description("Max results. Default 50.")]
             int maxResults = 50,
-        [Description("Match mode for 'text'. One of: 'contains' (default), 'filename', 'raw'.")]
+        [Description("'contains' (default), 'filename', or 'raw'.")]
             string mode = "contains",
-        [Description(
-            "Additional System.* property names to include in each result row. " +
-            "System.ItemPathDisplay is always included. " +
-            "Windows Search exposes ~600 properties grouped into families: " +
-            "root System.* (DateModified, DateCreated, DateAccessed, FileName, Size, ItemType, " +
-            "Author, Title, Kind, Keywords, Rating, …), " +
-            "System.Photo.* (DateTaken, CameraModel, FNumber, ISOSpeed, FocalLength, Orientation, …), " +
-            "System.Image.* (Dimensions, HorizontalSize, VerticalSize, BitDepth, …), " +
-            "System.Music.* (Artist, AlbumTitle, TrackNumber, Genre, Year, Composer, …), " +
-            "System.Video.* (FrameWidth, FrameHeight, FrameRate, TotalBitrate, Director, …), " +
-            "System.Audio.* (ChannelCount, SampleRate, EncodingBitrate, Format, …), " +
-            "System.Document.* (DateSaved, PageCount, WordCount, RevisionNumber, …), " +
-            "System.GPS.* (Latitude, Longitude, Altitude, …), " +
-            "System.Message.* (FromName, ToName, Subject, DateReceived, HasAttachments, …), " +
-            "System.Contact.*, System.Calendar.*, System.RecordedTV.*, System.Software.*, " +
-            "System.Search.*, System.Link.*, System.AppUserModel.*, System.Devices.*. " +
-            "Use the list_properties_by_family or list_properties tools to discover the exact " +
-            "names available on this machine.")]
-            string[]? columns = null,
-        [Description(
-            "Structured filters AND-combined with 'text'. Each filter targets one System.* property " +
-            "with an operator and value. Use for date ranges, size limits, EXIF metadata, etc. " +
-            "Examples: filter by modified-after with property='System.DateModified', op='>=', " +
-            "value='2024-01-01', valueType='text'; or by camera with property='System.Photo.CameraModel', " +
-            "op='=', value='Canon EOS R5'.")]
-            SearchFilter[]? filters = null,
-        [Description("Optional System.* property to sort by (e.g. 'System.DateModified', 'System.Size').")]
-            string? orderBy = null,
-        [Description("Sort direction when 'orderBy' is set: 'ASC' (default) or 'DESC'.")]
-            string? orderDir = null)
+        [Description("Extra System.* columns to return (e.g. 'System.DateModified,System.Size'). Comma-separated.")]
+            string columns = "",
+        [Description("Property filters as JSON, e.g. '[{\"property\":\"System.Kind\",\"op\":\"=\",\"value\":\"picture\"}]'. Pass empty string for no filters.")]
+            string filters = "",
+        [Description("System.* property to sort by. Pass empty string for no sort.")]
+            string orderBy = "",
+        [Description("'ASC' or 'DESC'. Default ASC.")]
+            string orderDir = "ASC")
     {
+        string? scopeArg = scope == "<UNSET>" ? null : scope;
+        string[]? columnsArg = string.IsNullOrEmpty(columns) ? null : columns.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        SearchFilter[]? filtersArg = string.IsNullOrEmpty(filters) ? null : JsonSerializer.Deserialize<SearchFilter[]>(filters);
+        string? orderByArg = string.IsNullOrEmpty(orderBy) ? null : orderBy;
+        string? orderDirArg = string.IsNullOrEmpty(orderDir) ? null : orderDir;
         // Always fetch System.ItemUrl so we can recover the path for DP:// symlink entries
         // where System.ItemPathDisplay is empty.
         const string itemUrl = "System.ItemUrl";
-        var fetchUrl = columns is null || !columns.Contains(itemUrl, StringComparer.OrdinalIgnoreCase);
+        var fetchUrl = columnsArg is null || !columnsArg.Contains(itemUrl, StringComparer.OrdinalIgnoreCase);
         if (fetchUrl)
         {
-            var extra = new string[( columns?.Length ?? 0) + 1];
-            columns?.CopyTo(extra, 0);
+            var extra = new string[(columnsArg?.Length ?? 0) + 1];
+            columnsArg?.CopyTo(extra, 0);
             extra[extra.Length - 1] = itemUrl;
-            columns = extra;
+            columnsArg = extra;
         }
 
         string sql;
         List<string> cols;
         try
         {
-            (sql, _, cols) = BuildSql(text, scope, maxResults, mode, columns, filters, orderBy, orderDir);
+            (sql, _, cols) = BuildSql(text, scopeArg, maxResults, mode, columnsArg, filtersArg, orderByArg, orderDirArg);
         }
         catch (ArgumentException ex)
         {

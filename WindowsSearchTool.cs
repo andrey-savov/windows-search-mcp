@@ -52,6 +52,16 @@ public static class WindowsSearchTool
     private static readonly HashSet<string> LikeOps =
         new(StringComparer.OrdinalIgnoreCase) { "LIKE", "NOT LIKE" };
 
+    // The tool description documents lowercase JSON keys ("property", "op", "value",
+    // "valueType"), but SearchFilter's C# properties are PascalCase. System.Text.Json's
+    // default deserialization is case-sensitive, so lowercase keys silently fail to bind
+    // and every filter comes back with Property == "" — which then fails
+    // ValidatePropertyName with a confusing "Invalid property name ''" error.
+    private static readonly JsonSerializerOptions FilterJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
     internal static (string sql, string? scopeUri, List<string> cols) BuildSql(
         string? query,
         string? scope,
@@ -332,7 +342,7 @@ public static class WindowsSearchTool
 
         string? scopeArg = scope == "<UNSET>" ? null : scope;
         string[]? columnsArg = string.IsNullOrEmpty(columns) ? null : columns.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        SearchFilter[]? filtersArg = string.IsNullOrEmpty(filters) ? null : JsonSerializer.Deserialize<SearchFilter[]>(filters);
+        SearchFilter[]? filtersArg = string.IsNullOrEmpty(filters) ? null : JsonSerializer.Deserialize<SearchFilter[]>(filters, FilterJsonOptions);
         string? orderByArg = string.IsNullOrEmpty(orderBy) ? null : orderBy;
         string? orderDirArg = string.IsNullOrEmpty(orderDir) ? null : orderDir;
         // Always fetch System.ItemUrl so we can recover the path for DP:// symlink entries

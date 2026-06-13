@@ -44,6 +44,53 @@ namespace WsSearchMcp.Tests
         }
 
         [Fact]
+        public void BuildSql_ContainsMode_DoubleQuotesNeutralized()
+        {
+            // A double quote in the term must not leak into the CONTAINS phrase and
+            // produce an unbalanced/malformed full-text predicate.
+            var (sql, _, _) = WindowsSearchTool.BuildSql("say \"hi\" there", null, 5, "contains", null);
+            Assert.Contains("CONTAINS('\"say hi there\"')", sql);
+            Assert.Contains("System.FileName LIKE '%say hi there%'", sql);
+            // The only double quotes left are the phrase delimiters ADO requires.
+            Assert.Equal(2, CountOccurrences(sql, "\""));
+        }
+
+        [Fact]
+        public void BuildSql_ContainsMode_OnlyQuotesThrows()
+        {
+            Assert.Throws<ArgumentException>(() =>
+                WindowsSearchTool.BuildSql("\"\"", null, 5, "contains", null));
+        }
+
+        [Fact]
+        public void BuildSql_ContainsFilter_DoubleQuotesNeutralized()
+        {
+            var filters = new[]
+            {
+                new SearchFilter { Property = "System.Author", Op = "CONTAINS", Value = "John \"Jack\" Smith" }
+            };
+            var (sql, _, _) = WindowsSearchTool.BuildSql(null, "", 10, "contains", null, filters);
+            Assert.Contains("CONTAINS(System.Author, 'John Jack Smith')", sql);
+        }
+
+        [Fact]
+        public void BuildSql_FilenameMode_ApostropheBecomesWildcard()
+        {
+            var (sql, _, _) = WindowsSearchTool.BuildSql("Samantha's driver", "", 5, "filename", null);
+            Assert.Contains("System.FileName LIKE '%Samantha_s driver%'", sql);
+        }
+
+        [Theory]
+        [InlineData("O'Brien")]      // straight apostrophe U+0027
+        [InlineData("O’Brien")] // typographic apostrophe U+2019
+        [InlineData("O‘Brien")] // left single quote U+2018
+        public void BuildSql_ContainsMode_ApostropheVariantsCanonicalizeToWildcard(string query)
+        {
+            var (sql, _, _) = WindowsSearchTool.BuildSql(query, "", 5, "contains", null);
+            Assert.Contains("System.FileName LIKE '%O_Brien%'", sql);
+        }
+
+        [Fact]
         public void BuildSql_UsesRawMode()
         {
             var (sql, _, cols) = WindowsSearchTool.BuildSql("x>0", null, 5, "raw", null);

@@ -10,7 +10,17 @@ if (toolIndex >= 0 && toolIndex + 1 < args.Length)
 {
     var toolName = args[toolIndex + 1];
     var inputIndex = Array.IndexOf(args, "--input");
-    var inputJson = inputIndex >= 0 && inputIndex + 1 < args.Length ? args[inputIndex + 1] : "{}";
+    // --input <json> takes precedence; otherwise read the JSON from stdin if it was
+    // redirected (this is how the out-of-package breakaway worker receives its args);
+    // otherwise default to an empty object.
+    string inputJson;
+    if (inputIndex >= 0 && inputIndex + 1 < args.Length)
+        inputJson = args[inputIndex + 1];
+    else if (Console.IsInputRedirected)
+        inputJson = Console.In.ReadToEnd();
+    else
+        inputJson = "{}";
+    if (string.IsNullOrWhiteSpace(inputJson)) inputJson = "{}";
 
     using var doc = JsonDocument.Parse(inputJson);
     var root = doc.RootElement;

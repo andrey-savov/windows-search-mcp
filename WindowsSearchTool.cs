@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.Versioning;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ModelContextProtocol;
@@ -116,12 +117,62 @@ public static class WindowsSearchTool
     private static string BuildQueryClause(string query, string mode) =>
         mode.ToLowerInvariant() switch
         {
-            "contains" => "(CONTAINS('\"" + EscapeSqlLiteral(query) + "\"') OR System.FileName LIKE '%" + EscapeSqlLiteral(query) + "%')",
-            "filename" => $"System.FileName LIKE '%{EscapeSqlLiteral(query)}%'",
+            "contains" => BuildContainsClause(query),
+            "filename" => $"System.FileName LIKE '%{BuildLikePattern(query)}%'",
             "raw" => query,
             _ => throw new ArgumentException(
                 $"Unknown mode '{mode}'. Expected one of: contains, filename, raw.", nameof(mode))
         };
+
+    // Builds the `contains` clause: a full-text CONTAINS phrase OR a filename substring
+    // match. The term is embedded inside CONTAINS('"<term>"'), so a double quote in the
+    // term would close the phrase early and yield a malformed full-text query that the
+    // OLE DB provider rejects. SanitizeFullText neutralizes that; the cleaned term is used
+    // for the filename match too, so a quoted query like  "annual report"  still matches a
+    // file named  annual report.pdf.
+    private static string BuildContainsClause(string query)
+    {
+        var phrase = SanitizeFullText(query);
+        if (phrase.Length == 0)
+            throw new ArgumentException("Query contains no searchable characters.", nameof(query));
+        return $"(CONTAINS('\"{EscapeSqlLiteral(phrase)}\"') OR System.FileName LIKE '%{BuildLikePattern(query)}%')";
+    }
+
+    // Double quotes delimit phrases inside a CONTAINS predicate, so an unbalanced one
+    // produces a malformed full-text query. They are word-breakers in full-text search,
+    // so replace them with spaces and collapse runs of whitespace to a single space.
+    private static string SanitizeFullText(string s) =>
+        Regex.Replace(s.Replace('"', ' '), @"\s+", " ").Trim();
+
+    // Builds the inner term of a  System.FileName LIKE '%...%'  pattern.
+    // Apostrophe/quote variants are canonicalized to the LIKE single-character wildcard
+    // '_' so a query typed with a straight apostrophe (U+0027) still matches a filename
+    // stored with a typographic one (U+2019) and vice versa — LIKE compares the indexed
+    // text literally, so canonicalizing only the query to a single quote would not match.
+    // Double quotes (which cannot occur in Windows filenames) are dropped to spaces.
+    private static string BuildLikePattern(string query)
+    {
+        var sb = new StringBuilder(query.Length);
+        foreach (var ch in query)
+        {
+            switch (ch)
+            {
+                // Single-quote / apostrophe family -> match any single character.
+                case '\'' or '‘' or '’' or 'ʼ' or '`' or '´':
+                    sb.Append('_');
+                    break;
+                // Double-quote family -> word break.
+                case '"' or '“' or '”':
+                    sb.Append(' ');
+                    break;
+                default:
+                    sb.Append(ch);
+                    break;
+            }
+        }
+        var normalized = Regex.Replace(sb.ToString(), @"\s+", " ").Trim();
+        return EscapeSqlLiteral(normalized);
+    }
 
     private static string RenderFilter(SearchFilter f)
     {
@@ -138,7 +189,11 @@ public static class WindowsSearchTool
             if (f.Value is null)
                 throw new ArgumentException(
                     $"Operator 'CONTAINS' requires a value (property: {f.Property}).");
-            return $"CONTAINS({f.Property}, '{EscapeSqlLiteral(f.Value)}')";
+            var term = SanitizeFullText(f.Value);
+            if (term.Length == 0)
+                throw new ArgumentException(
+                    $"CONTAINS value for '{f.Property}' has no searchable characters.");
+            return $"CONTAINS({f.Property}, '{EscapeSqlLiteral(term)}')";
         }
 
         var isComparison = ComparisonOps.Contains(op);
@@ -244,9 +299,17 @@ public static class WindowsSearchTool
     [McpServerTool(Name = "find_files")]
     [Description("Search the Windows Search index. Returns a JSON array of matching file paths.")]
     public static string Search(
-        [Description("Full-text search term (e.g. 'Erin Dawn'). Pass empty string to search by 'filters' only.")]
+        [Description(
+            "Full-text search term (e.g. 'Erin Dawn'). Pass empty string to search by 'filters' only. " +
+            "Quotes are handled for you: straight and typographic apostrophes/quotes are treated as " +
+            "interchangeable, so \"Samantha's\" matches a file named with either ' or ’. Just type the term naturally.")]
             string text,
-        [Description("Directory scope. Defaults to user profile. Pass empty string to search the entire index.")]
+        [Description(
+            "Where to search. THREE distinct cases:\n" +
+            "  (1) Omit it, or pass the literal \"<UNSET>\"  -> search your user profile folder (%USERPROFILE%) and its subfolders. This is the default.\n" +
+            "  (2) Pass an empty string \"\"                 -> search the ENTIRE Windows Search index: every indexed location, all drives.\n" +
+            "  (3) Pass an absolute folder path (e.g. 'C:\\\\Users\\\\me\\\\Documents' or 'D:\\\\Photos') -> search ONLY that folder and its subfolders.\n" +
+            "Tip: to search your whole PC, pass \"\" (empty string), not \"<UNSET>\".")]
             string scope = "<UNSET>",
         [Description("Max results. Default 50.")]
             int maxResults = 50,
@@ -261,6 +324,12 @@ public static class WindowsSearchTool
         [Description("'ASC' or 'DESC'. Default ASC.")]
             string orderDir = "ASC")
     {
+        // Some MCP hosts (notably the MSIX build of Claude Desktop) launch the server with
+        // a stripped environment that omits %CommonProgramFiles%. The Windows Search OLE DB
+        // provider needs it to load the OLE DB core components during query execution, so
+        // restore it before touching COM. See EnsureSearchComEnvironment.
+        EnsureSearchComEnvironment();
+
         string? scopeArg = scope == "<UNSET>" ? null : scope;
         string[]? columnsArg = string.IsNullOrEmpty(columns) ? null : columns.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         SearchFilter[]? filtersArg = string.IsNullOrEmpty(filters) ? null : JsonSerializer.Deserialize<SearchFilter[]>(filters);
@@ -289,14 +358,72 @@ public static class WindowsSearchTool
             throw new McpException(ex.Message, ex);
         }
 
+        try
+        {
+            return ExecuteComQuery(sql, cols, fetchUrl);
+        }
+        catch (Exception ex) when (IsClassNotRegistered(ex))
+        {
+            // If this still fires, the OLE DB core components could not be activated even
+            // after restoring %CommonProgramFiles% — surface an actionable message rather
+            // than the opaque "Class not registered".
+            Diag.Log($"find_files: REGDB_E_CLASSNOTREG after EnsureSearchComEnvironment. CommonProgramFiles={Environment.GetEnvironmentVariable("CommonProgramFiles")}");
+            throw new McpException(
+                "Windows Search query failed to activate the OLE DB provider (REGDB_E_CLASSNOTREG). " +
+                "This usually means %CommonProgramFiles% is missing from the environment and could not be restored.",
+                ex);
+        }
+    }
+
+    // The Windows Search OLE DB provider (Search.CollatorDSO) resolves the OLE DB core
+    // components from %CommonProgramFiles%\System\Ole DB during conn.Execute. Hosts that
+    // launch the server with a minimal environment (e.g. the MSIX Claude Desktop build)
+    // omit that variable, which makes execution fail with REGDB_E_CLASSNOTREG. Repopulate
+    // the *ProgramFiles common-files variables from the known-folder paths, which are read
+    // from the shell folders registry and do not depend on the environment block.
+    private static void EnsureSearchComEnvironment()
+    {
+        SetIfMissing("CommonProgramFiles", Environment.SpecialFolder.CommonProgramFiles);
+        SetIfMissing("CommonProgramFiles(x86)", Environment.SpecialFolder.CommonProgramFilesX86);
+
+        // On 64-bit Windows CommonProgramW6432 is the native Common Files path.
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CommonProgramW6432")))
+        {
+            var native = Environment.GetEnvironmentVariable("CommonProgramFiles");
+            if (!string.IsNullOrEmpty(native))
+                Environment.SetEnvironmentVariable("CommonProgramW6432", native);
+        }
+    }
+
+    private static void SetIfMissing(string name, Environment.SpecialFolder folder)
+    {
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name))) return;
+        var path = Environment.GetFolderPath(folder);
+        if (!string.IsNullOrEmpty(path))
+        {
+            Environment.SetEnvironmentVariable(name, path);
+            Diag.Log($"EnsureSearchComEnvironment: set {name}={path}");
+        }
+    }
+
+    // Executes the SQL over the Windows Search OLE DB provider (Search.CollatorDSO)
+    // via ADODB and serializes the rows to JSON. Throws COMException with HRESULT
+    // REGDB_E_CLASSNOTREG when the provider cannot be activated in this context.
+    private static string ExecuteComQuery(string sql, List<string> cols, bool fetchUrl)
+    {
+        const string itemUrl = "System.ItemUrl";
+
         var connType = Type.GetTypeFromProgID("ADODB.Connection")
             ?? throw new InvalidOperationException(
                 "ADODB.Connection ProgID not found. Is the Windows Search service installed and running?");
+        Diag.Log($"ExecuteComQuery: ADODB.Connection ProgID resolved to CLSID {connType.GUID}");
 
         dynamic conn = Activator.CreateInstance(connType)!;
+        Diag.Log("ExecuteComQuery: ADODB.Connection instance created; opening Search.CollatorDSO provider");
         try
         {
             conn.Open("Provider=Search.CollatorDSO;Extended Properties='Application=Windows';");
+            Diag.Log("ExecuteComQuery: provider opened; executing query");
             dynamic rs = conn.Execute(sql);
             try
             {
@@ -337,6 +464,21 @@ public static class WindowsSearchTool
         {
             try { conn.Close(); } catch { /* best-effort */ }
         }
+    }
+
+    // True if the exception (or any inner exception) is a COMException carrying
+    // REGDB_E_CLASSNOTREG (0x80040154).
+    private static bool IsClassNotRegistered(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is System.Runtime.InteropServices.COMException &&
+                unchecked((uint)e.HResult) == 0x80040154u)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     // DP://{SID}/X:/path/to/file#fragment  →  X:\path\to\file

@@ -19,7 +19,7 @@ mcp__ws-search__find_files(text="Erin Dawn", scope="")
 ```
 
 - `text`: search term (full-text + filename match). Pass `""` if you only want filter-based results.
-- `scope`: directory to search; pass `""` to search the entire index. Omit (or pass `"<UNSET>"`) to use user profile.
+- `scope`: **where to search — three cases.** Omit it or pass `"<UNSET>"` → user profile folder (`%USERPROFILE%`) and subfolders (the default). Pass `""` (empty string) → the **entire** index, all indexed locations and drives. Pass an absolute folder path (e.g. `"C:\\Users\\me\\Documents"`) → only that folder and its subfolders. To search the whole PC, use `""`, not `"<UNSET>"`.
 - `filters`: a JSON string like `'[{"property":"System.Kind","op":"=","value":"picture"}]'`. Pass `""` for no filters.
 - `columns`: comma-separated extra `System.*` columns to include in results, e.g. `"System.DateModified,System.Size"`.
 

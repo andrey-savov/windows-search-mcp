@@ -127,7 +127,7 @@ Once registered, an AI assistant can call the `search` tool with arguments like:
 |-----------|---------|
 | `query` | Optional search text. Combines with `filters` via `AND`. |
 | `mode` | `contains` (default — full-text *or* filename), `filename` (filename only), `raw` (verbatim WHERE clause). |
-| `scope` | Directory to limit to. Defaults to `%USERPROFILE%`. Pass `""` to search the entire index. |
+| `scope` | Directory to limit to. Defaults to the entire index. Pass an absolute path to search only that folder and its subfolders. |
 | `maxResults` | Cap on returned rows. Clamped to `[1, 1000]`. Default 50. |
 | `properties` | `System.*` columns to return alongside `System.ItemPathDisplay`. |
 | `filters` | Array of `{property, op, value, valueType}`. Ops: `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `IS NULL`, `IS NOT NULL`, `CONTAINS`. `valueType` is `text` (default; quoted, also for ISO 8601 dates), `number` (bare), or `bool` (`1`/`0`). |

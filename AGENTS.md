@@ -53,7 +53,7 @@ P/Invokes `PSEnumeratePropertyDescriptions` from `propsys.dll` to walk ~600 regi
 
 ### Key invariants
 
-- **`scope` has three cases**: omitted / `"<UNSET>"` (sentinel) → `%USERPROFILE%` and subfolders; `""` (empty) → the entire index (including non-`C:` drives); an absolute path → that folder and its subfolders. The public tool description spells all three out explicitly so callers don't confuse "default" with "whole PC".
+- **`scope` has three cases**: omitted / `"<UNSET>"` (sentinel) → the entire index (including non-`C:` drives); `""` (empty) → the entire index; an absolute path → that folder and its subfolders.
 - **`contains` mode** produces `(CONTAINS('"term"') OR System.FileName LIKE '%term%')` — both full-text and filename are always tried.
 - **Quote handling**: double quotes would break the `CONTAINS('"…"')` phrase wrapper, so `SanitizeFullText` collapses them to spaces before building the phrase (they are word-breakers in full-text search anyway). The same applies to the `CONTAINS` filter operator value.
 - **Apostrophe canonicalization in `LIKE`**: `BuildLikePattern` maps the apostrophe/quote family (`'` `‘` `’` `ʼ` `` ` `` `´`) to the `LIKE` single-character wildcard `_`, so a query typed with a straight apostrophe still matches a filename stored with a typographic one (files are commonly named `Name’s …` with U+2019 while users type U+0027). Canonicalizing only the query to a straight quote does **not** work, because `LIKE` compares the indexed filename literally and the index keeps the original character. Double quotes (illegal in Windows filenames) are dropped to spaces.

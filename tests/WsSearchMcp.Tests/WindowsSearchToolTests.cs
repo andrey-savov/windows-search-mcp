@@ -36,6 +36,14 @@ namespace WsSearchMcp.Tests
         }
 
         [Fact]
+        public void BuildSql_UnsetScope_SearchesEntireIndex()
+        {
+            var (sql, scopeUri, _) = WindowsSearchTool.BuildSql("file", null, 5, "filename", null);
+            Assert.Null(scopeUri);
+            Assert.DoesNotContain("SCOPE=", sql);
+        }
+
+        [Fact]
         public void BuildSql_ContainsModeAlsoMatchesFilename()
         {
             var (sql, _, cols) = WindowsSearchTool.BuildSql("gastro", null, 5, "contains", null);

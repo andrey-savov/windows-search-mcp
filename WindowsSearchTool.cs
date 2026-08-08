@@ -108,9 +108,6 @@ public static class WindowsSearchTool
         var where = string.Join($" {logicUpper} ", clauses);
         var sql = $"SELECT TOP {maxResults} {string.Join(", ", cols)} FROM SYSTEMINDEX WHERE {where}";
 
-        if (scope is null)
-            scope = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
         string? scopeUri = null;
         if (!string.IsNullOrEmpty(scope))
         {
@@ -322,10 +319,9 @@ public static class WindowsSearchTool
             string text,
         [Description(
             "Where to search. THREE distinct cases:\n" +
-            "  (1) Omit it, or pass the literal \"<UNSET>\"  -> search your user profile folder (%USERPROFILE%) and its subfolders. This is the default.\n" +
+            "  (1) Omit it, or pass the literal \"<UNSET>\"  -> search the ENTIRE Windows Search index: every indexed location, all drives. This is the default.\n" +
             "  (2) Pass an empty string \"\"                 -> search the ENTIRE Windows Search index: every indexed location, all drives.\n" +
-            "  (3) Pass an absolute folder path (e.g. 'C:\\\\Users\\\\me\\\\Documents' or 'D:\\\\Photos') -> search ONLY that folder and its subfolders.\n" +
-            "Tip: to search your whole PC, pass \"\" (empty string), not \"<UNSET>\".")]
+            "  (3) Pass an absolute folder path (e.g. 'C:\\\\Users\\\\me\\\\Documents' or 'D:\\\\Photos') -> search ONLY that folder and its subfolders.")]
             string scope = "<UNSET>",
         [Description("Max results. Default 50.")]
             int maxResults = 50,

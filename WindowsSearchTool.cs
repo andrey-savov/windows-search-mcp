@@ -70,7 +70,8 @@ public static class WindowsSearchTool
         string[]? columns,
         SearchFilter[]? filters = null,
         string? orderBy = null,
-        string? orderDir = null)
+        string? orderDir = null,
+        string filterLogic = "AND")
     {
         if (maxResults < 1) maxResults = 1;
         if (maxResults > 1000) maxResults = 1000;
@@ -99,7 +100,12 @@ public static class WindowsSearchTool
         if (clauses.Count == 0)
             throw new ArgumentException("At least one of 'query' or 'filters' must be provided.");
 
-        var where = string.Join(" AND ", clauses);
+        // Ensure filterLogic is a supported logical operator (AND/OR)
+        var logicUpper = filterLogic?.Trim().ToUpperInvariant();
+        if (logicUpper != "AND" && logicUpper != "OR")
+            throw new ArgumentException($"filterLogic must be 'AND' or 'OR', got '{filterLogic}'.", nameof(filterLogic));
+
+        var where = string.Join($" {logicUpper} ", clauses);
         var sql = $"SELECT TOP {maxResults} {string.Join(", ", cols)} FROM SYSTEMINDEX WHERE {where}";
 
         if (scope is null)
@@ -332,7 +338,9 @@ public static class WindowsSearchTool
         [Description("System.* property to sort by. Pass empty string for no sort.")]
             string orderBy = "",
         [Description("'ASC' or 'DESC'. Default ASC.")]
-            string orderDir = "ASC")
+            string orderDir = "ASC",
+        [Description("Logical operator to combine query and filter clauses. 'AND' (default) or 'OR'.")]
+            string filterLogic = "AND")
     {
         // Some MCP hosts (notably the MSIX build of Claude Desktop) launch the server with
         // a stripped environment that omits %CommonProgramFiles%. The Windows Search OLE DB
@@ -361,7 +369,7 @@ public static class WindowsSearchTool
         List<string> cols;
         try
         {
-            (sql, _, cols) = BuildSql(text, scopeArg, maxResults, mode, columnsArg, filtersArg, orderByArg, orderDirArg);
+            (sql, _, cols) = BuildSql(text, scopeArg, maxResults, mode, columnsArg, filtersArg, orderByArg, orderDirArg, filterLogic);
         }
         catch (ArgumentException ex)
         {

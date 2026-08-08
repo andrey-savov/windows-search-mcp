@@ -108,6 +108,33 @@ namespace WsSearchMcp.Tests
         }
 
         [Fact]
+        public void BuildSql_OrLogic_CombineQueryAndFilters()
+        {
+            var filters = new[] { new SearchFilter { Property = "System.Kind", Op = "=", Value = "picture" } };
+            var (sql, _, _) = WindowsSearchTool.BuildSql("foo", "", 10, "contains", null, filters, null, null, "OR");
+            Assert.Contains(" OR System.Kind = 'picture'", sql);
+        }
+
+        [Fact]
+        public void BuildSql_OrLogic_CombinesEveryClause()
+        {
+            var filters = new[]
+            {
+                new SearchFilter { Property = "System.Kind", Op = "=", Value = "picture" },
+                new SearchFilter { Property = "System.Size", Op = ">", Value = "1024", ValueType = "number" }
+            };
+            var (sql, _, _) = WindowsSearchTool.BuildSql("foo", "", 10, "filename", null, filters, null, null, "OR");
+            Assert.Contains("System.FileName LIKE '%foo%' OR System.Kind = 'picture' OR System.Size > 1024", sql);
+        }
+
+        [Fact]
+        public void BuildSql_InvalidFilterLogic_Throws()
+        {
+            Assert.Throws<ArgumentException>(() =>
+                WindowsSearchTool.BuildSql("foo", "", 10, "contains", null, null, null, null, "XOR"));
+        }
+
+        [Fact]
         public void BuildSql_NoQueryAndNoFilters_Throws()
         {
             Assert.Throws<ArgumentException>(() =>

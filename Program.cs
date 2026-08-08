@@ -38,7 +38,8 @@ if (toolIndex >= 0 && toolIndex + 1 < args.Length)
                 columns:    root.TryGetProperty("columns",    out var co)  ? (co.GetString() ?? "")                                   : "",
                 filters:    root.TryGetProperty("filters",    out var fi)  ? (fi.GetString() ?? "")                                   : "",
                 orderBy:    root.TryGetProperty("orderBy",    out var ob)  ? (ob.GetString() ?? "")                                   : "",
-                orderDir:   root.TryGetProperty("orderDir",   out var od)  ? (od.GetString() ?? "ASC")                                : "ASC"),
+                orderDir:   root.TryGetProperty("orderDir",   out var od)  ? (od.GetString() ?? "ASC")                                : "ASC",
+                filterLogic: root.TryGetProperty("filterLogic", out var fl) ? (fl.GetString() ?? "AND")                                : "AND"),
 
             "list_properties" => WindowsSearchTool.ListProperties(
                 filter:     root.TryGetProperty("filter",     out var f)   ? f.GetString()                                            : null,
@@ -48,7 +49,7 @@ if (toolIndex >= 0 && toolIndex + 1 < args.Length)
                 family:     root.TryGetProperty("family",     out var fam) ? (fam.GetString() ?? "")                                  : "",
                 maxResults: root.TryGetProperty("maxResults", out var mr3) ? mr3.GetInt32()                                           : 500),
 
-            _ => throw new ArgumentException($"Unknown tool '{toolName}'. Known tools: search, list_properties, list_properties_by_family.")
+            _ => throw new ArgumentException($"Unknown tool '{toolName}'. Known tools: find_files, list_properties, list_properties_by_family.")
         };
     }
     catch (Exception ex)

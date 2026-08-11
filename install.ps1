@@ -74,6 +74,22 @@ if (-not (Test-DotNet10Sdk)) {
     Write-Host ".NET 10 SDK ready." -ForegroundColor Green
 }
 
+$exe = Join-Path $InstallDir 'ws-search-mcp.exe'
+$runningServers = Get-Process -Name 'ws-search-mcp' -ErrorAction SilentlyContinue |
+    Where-Object {
+        try {
+            [string]::Equals($_.Path, $exe, [System.StringComparison]::OrdinalIgnoreCase)
+        } catch {
+            $false
+        }
+    }
+
+foreach ($server in $runningServers) {
+    Write-Host "Stopping running ws-search-mcp process $($server.Id) ..." -ForegroundColor Cyan
+    Stop-Process -Id $server.Id -Force -ErrorAction Stop
+    $server.WaitForExit()
+}
+
 Write-Host "Publishing to $InstallDir ..." -ForegroundColor Cyan
 $publishArgs = @(
     'publish', $csproj,
@@ -90,7 +106,6 @@ if ($SelfContained) {
 & dotnet @publishArgs
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)" }
 
-$exe = Join-Path $InstallDir 'ws-search-mcp.exe'
 if (-not (Test-Path $exe)) {
     throw "Expected binary not found after publish: $exe"
 }

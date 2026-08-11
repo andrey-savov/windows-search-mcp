@@ -6,7 +6,7 @@ Built on `ADODB.Connection` + `Search.CollatorDSO` (the same query engine the St
 
 ## Tools
 
-- **`search`** — full-text + filename matching with structured filters on any indexed `System.*` property, optional directory scope, ordering, and result cap.
+- **`find_files`** — full-text + filename matching with structured filters on any indexed `System.*` property, optional directory scope, ordering, and result cap.
 - **`list_properties_by_family`** — enumerate properties in a family (`Photo`, `Music`, `Video`, `Document`, `GPS`, `Message`, `Contact`, …).
 - **`list_properties`** — substring search across all ~600 properties registered on the machine (canonical name + display name).
 
@@ -115,22 +115,23 @@ Once registered, an AI assistant can call the `search` tool with arguments like:
 
 | Goal | Argument shape |
 |------|----------------|
-| Find readme files under a directory | `query="readme", mode="filename", scope="C:\\Users\\me\\source"` |
-| PDFs touched this week, newest first | `filters=[{property:"System.ItemType", op:"=", value:".pdf"}, {property:"System.DateAccessed", op:">=", value:"2026-05-03"}], orderBy:"System.DateAccessed", orderDir:"DESC"` |
-| Photos taken on a Canon EOS R5 in 2025 | `filters=[{property:"System.Photo.CameraModel", op:"=", value:"Canon EOS R5"}, {property:"System.Photo.DateTaken", op:">=", value:"2025-01-01"}], properties=["System.Photo.DateTaken","System.Image.Dimensions"]` |
-| Music tagged with a specific artist | `filters=[{property:"System.Music.Artist", op:"CONTAINS", value:"Radiohead"}]` |
+| Find readme files under a directory | `text="readme", mode="filename", scope="C:\\Users\\me\\source"` |
+| Files larger than 100 MB | `text="", filters="[{\"property\":\"System.Size\",\"op\":\">\",\"value\":\"104857600\",\"valueType\":\"number\"}]"` |
+| PDFs touched this week, newest first | `filters="[{\"property\":\"System.ItemType\",\"op\":\"=\",\"value\":\".pdf\"},{\"property\":\"System.DateAccessed\",\"op\":\">=\",\"value\":\"2026-05-03\"}]", orderBy="System.DateAccessed", orderDir="DESC"` |
+| Photos taken on a Canon EOS R5 in 2025 | `filters="[{\"property\":\"System.Photo.CameraModel\",\"op\":\"=\",\"value\":\"Canon EOS R5\"},{\"property\":\"System.Photo.DateTaken\",\"op\":\">=\",\"value\":\"2025-01-01\"}]", columns="System.Photo.DateTaken,System.Image.Dimensions"` |
+| Music tagged with a specific artist | `filters="[{\"property\":\"System.Music.Artist\",\"op\":\"CONTAINS\",\"value\":\"Radiohead\"}]"` |
 | "Which property holds the camera maker?" | `list_properties(filter:"camera")` |
 
 ### `search` parameter reference
 
 | Parameter | Purpose |
 |-----------|---------|
-| `query` | Optional search text. Combines with `filters` via `AND`. |
-| `mode` | `contains` (default — full-text *or* filename), `filename` (filename only), `raw` (verbatim WHERE clause). |
+| `text` | Search text. Pass `""` to search by `filters` only. Combines with `filters` via `AND`. |
+| `mode` | `contains` (default — full-text *or* filename), `filename` (filename only), `raw` (a verbatim Windows Search SQL `WHERE` clause, such as `System.Size > 104857600`; AQS such as `size:>100mb` is not supported here). |
 | `scope` | Directory to limit to. Defaults to the entire index. Pass an absolute path to search only that folder and its subfolders. |
 | `maxResults` | Cap on returned rows. Clamped to `[1, 1000]`. Default 50. |
-| `properties` | `System.*` columns to return alongside `System.ItemPathDisplay`. |
-| `filters` | Array of `{property, op, value, valueType}`. Ops: `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `IS NULL`, `IS NOT NULL`, `CONTAINS`. `valueType` is `text` (default; quoted, also for ISO 8601 dates), `number` (bare), or `bool` (`1`/`0`). |
+| `columns` | Comma-separated `System.*` columns to return alongside `System.ItemPathDisplay`. |
+| `filters` | A JSON string containing an array of `{property, op, value, valueType}`. `value` must be a string. Ops: `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `IS NULL`, `IS NOT NULL`, `CONTAINS`. `valueType` is `text` (default; quoted, also for ISO 8601 dates), `number` (bare), or `bool` (`1`/`0`). HTML-escaped comparison operators such as `&gt;` are accepted. |
 | `orderBy` / `orderDir` | Sort column and direction (`ASC` / `DESC`). |
 
 ## Build from source

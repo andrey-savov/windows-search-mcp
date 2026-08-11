@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Globalization;
+using System.Net;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
@@ -132,10 +133,20 @@ public static class WindowsSearchTool
         {
             "contains" => BuildContainsClause(query),
             "filename" => $"System.FileName LIKE '%{BuildLikePattern(query)}%'",
-            "raw" => query,
+            "raw" => ValidateRawSqlClause(query),
             _ => throw new ArgumentException(
                 $"Unknown mode '{mode}'. Expected one of: contains, filename, raw.", nameof(mode))
         };
+
+    private static string ValidateRawSqlClause(string query)
+    {
+        if (Regex.IsMatch(query, @"\b(?:System\.)?[A-Za-z][A-Za-z0-9.]*:\s*[<>]"))
+            throw new ArgumentException(
+                "Raw mode expects a Windows Search SQL WHERE clause, not AQS syntax. " +
+                "For example, use 'System.Size > 104857600', not 'System.Size:>100mb'.",
+                nameof(query));
+        return query;
+    }
 
     // Builds the `contains` clause: a full-text CONTAINS phrase OR a filename substring
     // match. The term is embedded inside CONTAINS('"<term>"'), so a double quote in the
@@ -191,7 +202,7 @@ public static class WindowsSearchTool
     {
         if (f is null) throw new ArgumentException("Filter cannot be null.", nameof(f));
         ValidatePropertyName(f.Property);
-        var op = (f.Op ?? "=").Trim();
+        var op = WebUtility.HtmlDecode((f.Op ?? "=").Trim());
         var opUpper = op.ToUpperInvariant();
 
         if (opUpper is "IS NULL" or "IS NOT NULL")
@@ -346,7 +357,20 @@ public static class WindowsSearchTool
 
         string? scopeArg = scope == "<UNSET>" ? null : scope;
         string[]? columnsArg = string.IsNullOrEmpty(columns) ? null : columns.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        SearchFilter[]? filtersArg = string.IsNullOrEmpty(filters) ? null : JsonSerializer.Deserialize<SearchFilter[]>(filters, FilterJsonOptions);
+        SearchFilter[]? filtersArg;
+        try
+        {
+            filtersArg = string.IsNullOrEmpty(filters)
+                ? null
+                : JsonSerializer.Deserialize<SearchFilter[]>(filters, FilterJsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            throw new McpException(
+                "Invalid filters JSON. Pass a JSON string containing an array; each filter value must be a string, " +
+                "for example: [{\"property\":\"System.Size\",\"op\":\">\",\"value\":\"104857600\",\"valueType\":\"number\"}].",
+                ex);
+        }
         string? orderByArg = string.IsNullOrEmpty(orderBy) ? null : orderBy;
         string? orderDirArg = string.IsNullOrEmpty(orderDir) ? null : orderDir;
         // Always fetch System.ItemUrl so we can recover the path for DP:// symlink entries
@@ -387,6 +411,11 @@ public static class WindowsSearchTool
                 "This usually means %CommonProgramFiles% is missing from the environment and could not be restored.",
                 ex);
         }
+            catch (Exception ex)
+            {
+                Diag.Log($"find_files: query execution failed: {ex.Message}");
+                throw new McpException($"Windows Search query failed: {ex.Message}", ex);
+            }
     }
 
     // The Windows Search OLE DB provider (Search.CollatorDSO) resolves the OLE DB core

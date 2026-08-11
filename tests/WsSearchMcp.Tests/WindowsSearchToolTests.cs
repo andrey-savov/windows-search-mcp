@@ -106,6 +106,14 @@ namespace WsSearchMcp.Tests
         }
 
         [Fact]
+        public void BuildSql_RawMode_AqsSizeComparisonExplainsExpectedSql()
+        {
+            var error = Assert.Throws<ArgumentException>(() =>
+                WindowsSearchTool.BuildSql("System.Size:>100mb", null, 5, "raw", null));
+            Assert.Contains("System.Size > 104857600", error.Message);
+        }
+
+        [Fact]
         public void BuildSql_FiltersAlone_WithoutQuery_Works()
         {
             var filters = new[] { new SearchFilter { Property = "System.Size", Op = ">", Value = "1024", ValueType = "number" } };
@@ -113,6 +121,17 @@ namespace WsSearchMcp.Tests
             Assert.Contains("WHERE System.Size > 1024", sql);
             Assert.DoesNotContain("CONTAINS", sql);
             Assert.DoesNotContain("LIKE", sql);
+        }
+
+        [Fact]
+        public void BuildSql_SizeGreaterThan_HtmlEscapedOperatorWorks()
+        {
+            var filters = new[]
+            {
+                new SearchFilter { Property = "System.Size", Op = "&gt;", Value = "104857600", ValueType = "number" }
+            };
+            var (sql, _, _) = WindowsSearchTool.BuildSql(null, "", 10, "contains", null, filters);
+            Assert.Contains("WHERE System.Size > 104857600", sql);
         }
 
         [Fact]

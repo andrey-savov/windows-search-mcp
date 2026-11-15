@@ -9,7 +9,7 @@ Built on `ADODB.Connection` + `Search.CollatorDSO` (the same query engine the St
 - **`find_files`** — full-text + filename matching with structured filters on any indexed `System.*` property, optional directory scope, ordering, and result cap.
 - **`list_properties_by_family`** — enumerate properties in a family (`Photo`, `Music`, `Video`, `Document`, `GPS`, `Message`, `Contact`, …).
 - **`list_properties`** — substring search across all ~600 properties registered on the machine (canonical name + display name).
-- **`get_file`** — *HTTPS server only, opt-in per client.* Retrieve a file's contents by the path the index reports. See [Retrieving files](#retrieving-files-get_file).
+- **`get_file`** — *HTTPS server only, opt-in per client.* Retrieve a file's contents by the path the index reports; PDF and Office files can be delivered as extracted text for text-only models. See [Retrieving files](#retrieving-files-get_file).
 
 ## Requirements
 

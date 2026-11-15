@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using WsSearchMcp.Files;
+using WsSearchMcp.Http.Conversion;
 using WsSearchMcp.Security;
 
 namespace WsSearchMcp.Http;
@@ -50,6 +51,12 @@ public sealed class McpHttpServerOptions
 
     /// <summary>Overrides the Windows Search lookup used by get_file (tests only). Default: the real index.</summary>
     public IndexedFileResolver? FileResolver { get; init; }
+
+    /// <summary>Limits for converting PDF/Office files to text (input size, expansion, timeout, cache).</summary>
+    public ConversionOptions Conversion { get; init; } = new();
+
+    /// <summary>Overrides the converters (tests only). Default: PDF and Office Open XML.</summary>
+    public IReadOnlyList<IContentConverter>? Converters { get; init; }
 
     public const long DefaultMaxFileBytes = 200L * 1024 * 1024;
     public const int DefaultPort = 8765;
@@ -97,6 +104,9 @@ public static class McpHttpServer
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(options.FilePolicy ?? FileAccessPolicy.CreateDefault(options.Paths ?? new ServerPaths()));
         builder.Services.AddSingleton(options.FileResolver ?? IndexedFileResolver.CreateDefault());
+        builder.Services.AddSingleton(options.Converters is { } converters
+            ? new ConversionService(converters, options.Conversion, options.MaxFileBytes)
+            : ConversionService.CreateDefault(options.Conversion, options.MaxFileBytes));
 
         builder.Services
             .AddMcpServer()

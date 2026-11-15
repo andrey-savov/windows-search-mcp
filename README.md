@@ -165,9 +165,22 @@ The Windows Search index holds file *names and metadata*; `get_file` reads the a
 & "$bin\ws-search-mcp-admin.exe" client mint "Work laptop" --files
 ```
 
-`get_file(path, offset = 0, length = 0, format = "auto")` — pass `path` exactly as `find_files` returned it (`System.ItemPathDisplay`).
+`get_file(path, offset = 0, length = 0, format = "auto", accept = "text/*")` — pass `path` exactly as `find_files` returned it (`System.ItemPathDisplay`).
 
-- **Reply:** a JSON metadata block (`path`, `size`, `modified`, `mimeType`, `encoding`, `offset`, `returned`, `nextOffset`, `truncated`, `maxBytesPerCall`) followed by the content. Text (UTF-8, or UTF-16 with a BOM) comes back as text, complete images as images, everything else as a base64 blob. `format` can force `text` or `base64`.
+- **Reply:** a JSON metadata block (`path`, `size`, `modified`, `mimeType`, `encoding`, `offset`, `returned`, `nextOffset`, `truncated`, `maxBytesPerCall`, `accept`, `deliveredAs`, and for converted files `sourceSize`, `convertedFrom`, `note`) followed by the content. `format` can force `text` or `base64` and bypasses negotiation.
+- **What you get depends on `accept` (content negotiation).** MCP has no standard way for a client to say which file types its model can read, and the HTTPS server is stateless, so the client states it per call in `accept`: a comma-separated MIME list with wildcards (`"text/*,image/*,application/pdf"`, or `"*/*"`). Text is always acceptable. The default is `text/*`, which suits text-only models. The server then picks the best form of the file:
+
+  | File | `accept` covers its type | otherwise |
+  |------|--------------------------|-----------|
+  | Text (UTF-8, or UTF-16 with a BOM) | text | text |
+  | PNG / JPEG / GIF / WebP | image block, always whole | refused (images cannot become text) |
+  | PDF, docx/docm, xlsx/xlsm, pptx/pptm | the raw file as a binary attachment | **extracted text** |
+  | Anything else (zip, legacy `.doc/.xls/.ppt`, unknown binaries) | binary attachment | refused, with the MIME type to pass |
+
+  File types are recognised by their content, not the extension. Extraction is lossy and has no OCR: PDFs give text page by page (`--- page N ---`; a scanned PDF has no text layer and fails with a clear error), Word gives body text with tables tab-separated, Excel gives one TSV block per sheet in workbook order (`--- sheet: name ---`, dates as serial numbers), PowerPoint gives slide text in presentation order. For converted files `size`, `offset`, `length` and `nextOffset` count bytes of the extracted UTF-8 text (the original size is `sourceSize`); the result is cached briefly so paging does not reconvert.
+- **Tell the model the fallback.** The tool description instructs the model to retry with `accept="text/*"` if its client says it cannot read what it received (for example opencode's "this model does not support pdf input", which a harness raises *after* the server has replied). Passing `application/pdf` returns the raw PDF, which a text-only model cannot use and which is useless for a scanned PDF, so only list types your model really reads.
+- **Upgrading from the first `get_file`:** it used to send images and binaries unasked. Now a client that wants images or raw PDFs must say so in `accept` (`"text/*,image/*,application/pdf"`); otherwise PDFs and Office files arrive as text and other binaries are refused with a message naming the type to pass.
+- **Conversion limits.** Files over **50 MiB** are not converted (`"maxConvertBytes"` in `config.json`), a package may decompress to at most 200 MiB of *actual* bytes (never the zip header's declared sizes), and one conversion may run for 60 s (`"convertTimeoutSeconds"`). XML is read with DTDs prohibited. Conversion only ever runs after the permission, index and deny-list checks.
 - **Paging:** large files are read in chunks. Pass a modest `length` (for example 100000) and keep calling with `offset = nextOffset` until `nextOffset` is `null`. Chunks never split a character. AI clients cap tool output far below the server's limit (Claude Code defaults to about 25k tokens, adjustable with `MAX_MCP_OUTPUT_TOKENS`), so small chunks are the practical way to read big files.
 - **Server cap:** one call returns at most **200 MiB** by default. Change it with `ws-search-mcp-http.exe --max-file-mb N` or `"maxFileBytes"` (bytes) in `config.json`; the flag wins. A reply holds the bytes plus their base64 and JSON forms in memory at once, so a single maximum-size read can use close to 1 GB of RAM — raise the cap with care, and prefer paging.
 - **Index = allowlist.** Only files the index knows about can be read, and the path that gets opened is the index's canonical one, never the caller's string. Entries the index stores only as `DP://` links are matched through their file name.

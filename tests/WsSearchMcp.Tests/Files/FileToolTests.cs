@@ -6,6 +6,7 @@ using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using WsSearchMcp.Files;
 using WsSearchMcp.Http;
+using WsSearchMcp.Http.Conversion;
 using WsSearchMcp.Security;
 using Xunit;
 
@@ -21,7 +22,8 @@ public class FileToolTests : IDisposable
 
     public void Dispose() => _t.Dispose();
 
-    private FileTool Tool(ClientRecord? client, long cap = McpHttpServerOptions.DefaultMaxFileBytes, FileAccessPolicy? policy = null)
+    private FileTool Tool(ClientRecord? client, long cap = McpHttpServerOptions.DefaultMaxFileBytes, FileAccessPolicy? policy = null,
+        ConversionService? conversion = null)
     {
         var ctx = new DefaultHttpContext();
         if (client is not null) ctx.Items[McpHttpServer.ClientItemKey] = client;
@@ -30,7 +32,7 @@ public class FileToolTests : IDisposable
             Store = new InMemoryClientStore(), Certificate = TestClients.PublicCert(), MaxFileBytes = cap,
         };
         return new FileTool(new HttpContextAccessor { HttpContext = ctx }, options, policy ?? _t.Policy(),
-            _index.Resolver, NullLogger<FileTool>.Instance);
+            _index.Resolver, conversion ?? ConversionService.CreateDefault(new ConversionOptions(), cap), NullLogger<FileTool>.Instance);
     }
 
     private FileTool WithFiles(long cap = McpHttpServerOptions.DefaultMaxFileBytes) => Tool(TestClients.Make(files: true), cap);
@@ -137,7 +139,7 @@ public class FileToolTests : IDisposable
     {
         var bytes = Enumerable.Range(0, 300).Select(i => (byte)(i * 7)).ToArray();
         var f = _t.Bytes("data.bin", bytes);
-        var blocks = (await WithFiles().GetFile(f)).ToList();
+        var blocks = (await WithFiles().GetFile(f, accept: "*/*")).ToList();
 
         var blob = Assert.IsType<BlobResourceContents>(Assert.IsType<EmbeddedResourceBlock>(blocks[1]).Resource);
         Assert.Equal(bytes, blob.DecodedData.ToArray());
@@ -147,18 +149,14 @@ public class FileToolTests : IDisposable
     }
 
     [Fact]
-    public async Task Complete_image_is_an_image_block_but_a_partial_image_is_a_blob()
+    public async Task Complete_image_is_an_image_block_when_images_are_accepted()
     {
         var f = _t.Bytes("pic.png", TinyPng);
-        var whole = (await WithFiles().GetFile(f)).ToList();
+        var whole = (await WithFiles().GetFile(f, accept: "image/*")).ToList();
         var img = Assert.IsType<ImageContentBlock>(whole[1]);
         Assert.Equal("image/png", img.MimeType);
         Assert.Equal(TinyPng, img.DecodedData.ToArray());
-
-        var part = (await WithFiles().GetFile(f, 0, 10)).ToList();
-        var blob = Assert.IsType<BlobResourceContents>(Assert.IsType<EmbeddedResourceBlock>(part[1]).Resource);
-        Assert.Equal(TinyPng.Take(10).ToArray(), blob.DecodedData.ToArray());
-        Assert.True(Meta(part).GetProperty("truncated").GetBoolean());
+        Assert.Equal("image", Meta(whole).GetProperty("deliveredAs").GetString());
     }
 
     [Fact]

@@ -81,8 +81,39 @@ if (fileCap <= 0)
     return 2;
 }
 
+var conversion = new WsSearchMcp.Http.Conversion.ConversionOptions();
+if (config.MaxConvertBytes is { } maxConvert)
+{
+    if (maxConvert <= 0)
+    {
+        Console.Error.WriteLine("maxConvertBytes in config.json must be greater than 0.");
+        return 2;
+    }
+    conversion = new WsSearchMcp.Http.Conversion.ConversionOptions
+    {
+        MaxInputBytes = maxConvert,
+        MaxExpandedBytes = Math.Max(conversion.MaxExpandedBytes, maxConvert * 4),
+    };
+}
+if (config.ConvertTimeoutSeconds is { } timeoutSeconds)
+{
+    if (timeoutSeconds <= 0)
+    {
+        Console.Error.WriteLine("convertTimeoutSeconds in config.json must be greater than 0.");
+        return 2;
+    }
+    conversion = new WsSearchMcp.Http.Conversion.ConversionOptions
+    {
+        MaxInputBytes = conversion.MaxInputBytes,
+        MaxExpandedBytes = conversion.MaxExpandedBytes,
+        CacheBytes = conversion.CacheBytes,
+        Timeout = TimeSpan.FromSeconds(timeoutSeconds),
+    };
+}
+
 var app = McpHttpServer.Build(new McpHttpServerOptions
 {
+    Conversion = conversion,
     Store = store,
     Certificate = cert,
     Port = port,

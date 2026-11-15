@@ -68,6 +68,12 @@ public sealed class ServerConfig
     /// <summary>Per-call cap for the get_file tool in bytes. Unset = the server default (200 MiB).</summary>
     public long? MaxFileBytes { get; set; }
 
+    /// <summary>Largest file get_file will convert to text (PDF/Office), in bytes. Unset = 50 MiB.</summary>
+    public long? MaxConvertBytes { get; set; }
+
+    /// <summary>Wall-clock limit of one get_file text conversion, in seconds. Unset = 60.</summary>
+    public int? ConvertTimeoutSeconds { get; set; }
+
     public static ServerConfig Load(ServerPaths paths) =>
         ServerPaths.ReadJson<ServerConfig>(paths.ConfigFile) ?? new ServerConfig();
 

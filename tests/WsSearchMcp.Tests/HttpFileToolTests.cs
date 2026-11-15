@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using WsSearchMcp.Http;
+using WsSearchMcp.Tests.Files;
 using Xunit;
 
 namespace WsSearchMcp.Tests;
@@ -21,9 +22,11 @@ public class HttpFileToolTests : IClassFixture<HttpServerFixture>
         return JsonDocument.Parse(json).RootElement.GetProperty("result").Clone();
     }
 
-    private async Task<(HttpStatusCode status, JsonElement result)> CallAsync(string token, string path, long offset = 0, long length = 0)
+    private async Task<(HttpStatusCode status, JsonElement result)> CallAsync(string token, string path, long offset = 0, long length = 0, string? accept = null)
     {
-        var args = JsonSerializer.Serialize(new { path, offset, length });
+        var args = accept is null
+            ? JsonSerializer.Serialize(new { path, offset, length })
+            : JsonSerializer.Serialize(new { path, offset, length, accept });
         var r = await _s.PostAsync(
             """{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_file","arguments":""" + args + "}}", token);
         var body = await r.Content.ReadAsStringAsync();
@@ -75,7 +78,7 @@ public class HttpFileToolTests : IClassFixture<HttpServerFixture>
     {
         var bytes = Enumerable.Range(0, 500).Select(i => (byte)(i * 13)).ToArray();
         var f = _s.Files.Bytes("blob.bin", bytes);
-        var (_, result) = await CallAsync(_s.Mint("blob-reader", files: true), f);
+        var (_, result) = await CallAsync(_s.Mint("blob-reader", files: true), f, accept: "application/octet-stream");
         Assert.False(IsError(result));
         var res = result.GetProperty("content")[1];
         Assert.Equal("resource", res.GetProperty("type").GetString());
@@ -91,6 +94,53 @@ public class HttpFileToolTests : IClassFixture<HttpServerFixture>
         var (_, b) = await CallAsync(token, f, 4, 4);
         Assert.Equal("0123", a.GetProperty("content")[1].GetProperty("text").GetString());
         Assert.Equal("4567", b.GetProperty("content")[1].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task Binary_file_with_the_default_accept_is_refused_with_guidance()
+    {
+        var f = _s.Files.Bytes("opaque.bin", new byte[] { 0, 1, 2, 3, 255 });
+        var (status, result) = await CallAsync(_s.Mint("default-accept", files: true), f);
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.True(IsError(result));
+        Assert.Contains("cannot be delivered", ErrorText(result));
+        Assert.Contains("accept", ErrorText(result));
+    }
+
+    [Fact]
+    public async Task A_pdf_arrives_as_text_by_default_and_as_a_resource_when_accepted()
+    {
+        var pdf = DocumentFixtures.Pdf("Hello over https");
+        var f = _s.Files.Bytes("doc.pdf", pdf);
+        var token = _s.Mint("pdf-reader", files: true);
+
+        var (_, text) = await CallAsync(token, f);
+        Assert.False(IsError(text));
+        using (var meta = JsonDocument.Parse(text.GetProperty("content")[0].GetProperty("text").GetString()!))
+            Assert.Equal("converted-text", meta.RootElement.GetProperty("deliveredAs").GetString());
+        Assert.Contains("Hello over https", text.GetProperty("content")[1].GetProperty("text").GetString());
+
+        var (_, native) = await CallAsync(token, f, accept: "application/pdf");
+        Assert.False(IsError(native));
+        var res = native.GetProperty("content")[1];
+        Assert.Equal("resource", res.GetProperty("type").GetString());
+        Assert.Equal("application/pdf", res.GetProperty("resource").GetProperty("mimeType").GetString());
+        Assert.Equal(pdf, Convert.FromBase64String(res.GetProperty("resource").GetProperty("blob").GetString()!));
+    }
+
+    [Fact]
+    public async Task Tool_schema_exposes_accept_as_a_plain_string_and_the_description_carries_the_fallback()
+    {
+        var token = _s.Mint("schema-reader");
+        var r = await _s.PostAsync("""{"jsonrpc":"2.0","id":3,"method":"tools/list"}""", token);
+        var tools = Result(await r.Content.ReadAsStringAsync()).GetProperty("tools").EnumerateArray().ToList();
+        var getFile = tools.Single(t => t.GetProperty("name").GetString() == "get_file");
+
+        var accept = getFile.GetProperty("inputSchema").GetProperty("properties").GetProperty("accept");
+        Assert.Equal("string", accept.GetProperty("type").GetString()); // no nullable type unions (Claude schema rule)
+        Assert.Equal("text/*", accept.GetProperty("default").GetString());
+        Assert.Contains("accept=\"text/*\"", getFile.GetProperty("description").GetString());
+        Assert.DoesNotContain("accept", getFile.GetProperty("inputSchema").GetProperty("required").EnumerateArray().Select(e => e.GetString()));
     }
 
     [Theory]

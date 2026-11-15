@@ -72,8 +72,39 @@ public class ContentNegotiatorTests
 {
     private const string Docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-    private static Delivery Decide(FileKind kind, string mime, string accept, bool textLike = false, string format = "auto", bool canConvert = true) =>
-        ContentNegotiator.Decide(kind, textLike, mime, format, AcceptList.Parse(accept), canConvert);
+    private static Delivery Decide(FileKind kind, string mime, string accept, bool textLike = false, string format = "auto", bool canConvert = true, bool canRender = false) =>
+        ContentNegotiator.Decide(kind, textLike, mime, format, AcceptList.Parse(accept), canConvert, canRender);
+
+    [Theory]
+    [InlineData("text/*,image/*", Delivery.RenderedImages)]
+    [InlineData("image/png", Delivery.RenderedImages)]
+    [InlineData("image/jpeg", Delivery.RenderedImages)]
+    [InlineData("image/webp", Delivery.RenderedImages)]
+    [InlineData("*/*", Delivery.Blob)]                        // the raw PDF is the best binary when it is accepted
+    [InlineData("application/pdf,image/*", Delivery.Blob)]
+    [InlineData("text/*", Delivery.ConvertedText)]            // no image type accepted: extracted text
+    [InlineData("image/tiff", Delivery.ConvertedText)]        // an image type we cannot render to
+    [InlineData("image/svg+xml", Delivery.ConvertedText)]
+    public void A_pdf_goes_out_as_page_images_when_images_are_accepted_but_not_pdf(string accept, Delivery expected) =>
+        Assert.Equal(expected, Decide(FileKind.Pdf, "application/pdf", accept, canRender: true));
+
+    [Fact]
+    public void Without_a_renderer_a_pdf_still_converts_to_text_and_office_files_never_render()
+    {
+        Assert.Equal(Delivery.ConvertedText, Decide(FileKind.Pdf, "application/pdf", "image/*", canRender: false));
+        Assert.Equal(Delivery.ConvertedText, Decide(FileKind.OoxmlWord, Docx, "image/*", canRender: true));
+        Assert.Equal(Delivery.Text, Decide(FileKind.Pdf, "application/pdf", "image/*", format: "text", canRender: true));
+    }
+
+    [Fact]
+    public void Rendered_pages_prefer_png_then_jpeg_then_webp()
+    {
+        Assert.Equal("image/png", ContentNegotiator.RenderMime(AcceptList.Parse("image/*")));
+        Assert.Equal("image/png", ContentNegotiator.RenderMime(AcceptList.Parse("image/webp,image/png,image/jpeg")));
+        Assert.Equal("image/jpeg", ContentNegotiator.RenderMime(AcceptList.Parse("image/jpeg,image/webp")));
+        Assert.Equal("image/webp", ContentNegotiator.RenderMime(AcceptList.Parse("image/webp")));
+        Assert.Null(ContentNegotiator.RenderMime(AcceptList.Parse("text/*,application/pdf")));
+    }
 
     [Fact]
     public void Text_is_text_whatever_is_accepted()
@@ -447,6 +478,68 @@ public class ConversionServiceTests
     }
 }
 
+public class PdfRenderingServiceTests
+{
+    private sealed class FakeRenderer : IPdfRenderer
+    {
+        public int Pages { get; init; } = 3;
+        public Action? OnRender { get; init; }
+        public int GetPageCount(byte[] pdf) => Pages;
+        public RenderedPage Render(byte[] pdf, int pageIndex, string mimeType, int maxDimension, int maxDpi)
+        {
+            OnRender?.Invoke();
+            return new RenderedPage(pageIndex + 1, new byte[100], mimeType, 10, 10);
+        }
+    }
+
+    private static ConversionService Service(IPdfRenderer renderer, ConversionOptions? options = null) =>
+        new(Array.Empty<IContentConverter>(), options ?? new ConversionOptions(), 1_000_000, renderer);
+
+    private static Task<RenderResult> Render(ConversionService s, int first = 0, int max = 10, long maxBytes = 1_000_000) =>
+        s.RenderPagesAsync(new ConversionKey("C:/x.pdf", 10, 1), new MemoryStream(new byte[10]), "image/png", first, max, maxBytes, 1568, 150, CancellationToken.None);
+
+    [Fact]
+    public async Task Pages_are_returned_from_the_requested_page_up_to_the_requested_count()
+    {
+        var s = Service(new FakeRenderer { Pages = 5 });
+        var r = await Render(s, first: 1, max: 2);
+        Assert.Equal(5, r.PageCount);
+        Assert.Equal(new[] { 2, 3 }, r.Pages.Select(p => p.Page));
+        Assert.Empty((await Render(s, first: 9)).Pages);
+    }
+
+    [Fact]
+    public async Task Pages_stop_at_the_byte_cap_but_the_first_page_always_fits_or_fails()
+    {
+        var s = Service(new FakeRenderer { Pages = 5 });
+        Assert.Equal(2, (await Render(s, max: 10, maxBytes: 250)).Pages.Count); // 100 bytes per page
+        await Assert.ThrowsAsync<ConversionLimitException>(() => Render(s, max: 10, maxBytes: 50));
+    }
+
+    [Fact]
+    public async Task A_renderer_that_hangs_times_out_and_does_not_block_the_next_caller_forever()
+    {
+        var release = new ManualResetEventSlim();
+        var s = Service(new FakeRenderer { OnRender = () => release.Wait(TimeSpan.FromSeconds(10)) },
+            new ConversionOptions { Timeout = TimeSpan.FromMilliseconds(300) });
+        var ex = await Assert.ThrowsAsync<ConversionLimitException>(() => Render(s));
+        Assert.Contains("timed out", ex.Message);
+
+        // The hung native call still holds the gate: the next caller must fail fast, not queue indefinitely.
+        var busy = await Assert.ThrowsAsync<ConversionLimitException>(() => Render(s));
+        Assert.Contains("busy", busy.Message);
+        release.Set();
+    }
+
+    [Fact]
+    public async Task Oversized_input_is_not_rendered()
+    {
+        var s = Service(new FakeRenderer(), new ConversionOptions { MaxInputBytes = 5 });
+        var ex = await Assert.ThrowsAsync<ConversionLimitException>(() => Render(s));
+        Assert.Contains("not rendered", ex.Message);
+    }
+}
+
 /// <summary>get_file negotiation and conversion through the tool itself (policy, index and permission still apply first).</summary>
 public class FileToolNegotiationTests : IDisposable
 {
@@ -523,6 +616,112 @@ public class FileToolNegotiationTests : IDisposable
         Assert.Contains("could not be converted", ex.Message);
         Assert.Contains("no extractable text", ex.Message);
         Assert.DoesNotContain(_t.Root, ex.Message); // no server paths in client errors
+    }
+
+    // ---- PDF as rendered images ------------------------------------------------------------------
+
+    private static readonly byte[] PngSignature = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+
+    [Fact]
+    public async Task A_pdf_is_delivered_as_page_images_not_text_when_images_are_accepted()
+    {
+        var f = _t.Bytes("report.pdf", DocumentFixtures.Pdf("Page one", "Page two", "Page three"));
+        var blocks = (await Tool().GetFile(f, accept: "text/*,image/*")).ToList();
+
+        var m = Meta(blocks);
+        Assert.Equal("rendered-images", m.GetProperty("deliveredAs").GetString());
+        Assert.Equal("application/pdf", m.GetProperty("convertedFrom").GetString());
+        Assert.Equal("image/png", m.GetProperty("mimeType").GetString());
+        Assert.Equal("pages", m.GetProperty("unit").GetString());
+        Assert.Equal(3, m.GetProperty("size").GetInt64());
+        Assert.Equal(1, m.GetProperty("returned").GetInt64());
+        Assert.Equal(1, m.GetProperty("nextOffset").GetInt64());
+        Assert.Contains("accept=\"text/*\"", m.GetProperty("note").GetString());
+
+        Assert.Equal(2, blocks.Count); // metadata + one page; no text block
+        var img = Assert.IsType<ImageContentBlock>(blocks[1]);
+        Assert.Equal("image/png", img.MimeType);
+        Assert.Equal(PngSignature, img.DecodedData.ToArray().Take(8).ToArray());
+
+        var page = m.GetProperty("pages")[0];
+        Assert.Equal(1, page.GetProperty("page").GetInt32());
+        Assert.InRange(page.GetProperty("height").GetInt32(), 1000, 1568);  // A4: the longest edge is the height
+        Assert.True(page.GetProperty("width").GetInt32() < page.GetProperty("height").GetInt32());
+    }
+
+    [Fact]
+    public async Task Rendered_pages_are_paged_by_page_number()
+    {
+        var f = _t.Bytes("three.pdf", DocumentFixtures.Pdf("a", "b", "c"));
+        var tool = Tool();
+
+        var two = (await tool.GetFile(f, offset: 0, length: 2, accept: "image/*")).ToList();
+        Assert.Equal(3, two.Count);
+        Assert.Equal(2, Meta(two).GetProperty("returned").GetInt64());
+        Assert.Equal(2, Meta(two).GetProperty("nextOffset").GetInt64());
+
+        var last = (await tool.GetFile(f, offset: 2, accept: "image/*")).ToList();
+        Assert.Equal(2, last.Count);
+        Assert.Equal(JsonValueKind.Null, Meta(last).GetProperty("nextOffset").ValueKind);
+        Assert.False(Meta(last).GetProperty("truncated").GetBoolean());
+
+        var past = (await tool.GetFile(f, offset: 7, accept: "image/*")).ToList();
+        Assert.Single(past); // metadata only
+        Assert.Equal(0, Meta(past).GetProperty("returned").GetInt64());
+    }
+
+    [Fact]
+    public async Task The_pages_per_call_limit_applies_however_many_are_requested()
+    {
+        var f = _t.Bytes("many.pdf", DocumentFixtures.Pdf("1", "2", "3", "4"));
+        var conversion = ConversionService.CreateDefault(new ConversionOptions { RenderMaxPagesPerCall = 2 }, McpHttpServerOptions.DefaultMaxFileBytes);
+        var blocks = (await Tool(conversion).GetFile(f, length: 99, accept: "image/*")).ToList();
+        Assert.Equal(2, Meta(blocks).GetProperty("returned").GetInt64());
+        Assert.Equal(2, Meta(blocks).GetProperty("nextOffset").GetInt64());
+    }
+
+    [Fact]
+    public async Task A_scanned_pdf_that_has_no_text_still_works_as_images()
+    {
+        var f = _t.Bytes("scan.pdf", DocumentFixtures.Pdf("", ""));
+        var blocks = (await Tool().GetFile(f, accept: "text/*,image/*")).ToList();
+        Assert.IsType<ImageContentBlock>(blocks[1]);
+    }
+
+    [Fact]
+    public async Task The_accepted_image_type_decides_the_rendered_format()
+    {
+        var f = _t.Bytes("fmt.pdf", DocumentFixtures.Pdf("hi"));
+        var jpeg = (await Tool().GetFile(f, accept: "image/jpeg")).ToList();
+        var img = Assert.IsType<ImageContentBlock>(jpeg[1]);
+        Assert.Equal("image/jpeg", img.MimeType);
+        Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF }, img.DecodedData.ToArray().Take(3).ToArray());
+    }
+
+    [Fact]
+    public async Task Native_pdf_delivery_beats_rendering_when_both_are_accepted()
+    {
+        var f = _t.Bytes("both.pdf", DocumentFixtures.Pdf("hi"));
+        var blocks = (await Tool().GetFile(f, accept: "application/pdf,image/*")).ToList();
+        Assert.Equal("blob", Meta(blocks).GetProperty("deliveredAs").GetString());
+    }
+
+    [Fact]
+    public async Task A_pdf_that_cannot_be_rendered_says_so_and_points_at_the_text_fallback()
+    {
+        var f = _t.Bytes("bad.pdf", Encoding.ASCII.GetBytes("%PDF-1.4\nthis is not really a pdf\n"));
+        var ex = await Assert.ThrowsAsync<McpException>(() => Tool().GetFile(f, accept: "image/*"));
+        Assert.Contains("could not be rendered", ex.Message);
+        Assert.Contains("accept=\"text/*\"", ex.Message);
+        Assert.DoesNotContain(_t.Root, ex.Message);
+    }
+
+    [Fact]
+    public async Task A_rendered_page_larger_than_the_per_call_cap_is_refused()
+    {
+        var f = _t.Bytes("big.pdf", DocumentFixtures.Pdf("hi"));
+        var ex = await Assert.ThrowsAsync<McpException>(() => Tool(cap: 100).GetFile(f, accept: "image/*"));
+        Assert.Contains("per-call cap", ex.Message);
     }
 
     // ---- Office --------------------------------------------------------------------------------
@@ -725,6 +924,34 @@ public class FileToolNegotiationTests : IDisposable
         Assert.Equal(0, counting.Calls);
     }
 
+    private sealed class CountingRenderer : IPdfRenderer
+    {
+        public int Calls;
+        public int GetPageCount(byte[] pdf) { Interlocked.Increment(ref Calls); return 1; }
+        public RenderedPage Render(byte[] pdf, int pageIndex, string mimeType, int maxDimension, int maxDpi)
+        {
+            Interlocked.Increment(ref Calls);
+            return new RenderedPage(1, new byte[10], mimeType, 1, 1);
+        }
+    }
+
+    [Fact]
+    public async Task Denied_and_unindexed_files_never_reach_the_renderer()
+    {
+        var renderer = new CountingRenderer();
+        var service = new ConversionService(Array.Empty<IContentConverter>(), new ConversionOptions(), 1_000_000, renderer);
+        var pdf = DocumentFixtures.Pdf("top secret");
+
+        var dot = _t.Bytes(@".git\secret.pdf", pdf);
+        var hidden = _t.Bytes(@"d\hidden.pdf", pdf);
+        TempTree.Hide(hidden);
+        var notIndexed = _t.P("never-indexed.pdf");
+
+        foreach (var p in new[] { dot, hidden, notIndexed })
+            await Assert.ThrowsAsync<McpException>(() => Tool(service).GetFile(p, accept: "image/*"));
+        Assert.Equal(0, renderer.Calls);
+    }
+
     [Fact]
     public async Task A_cancelled_request_does_not_wait_for_a_stuck_conversion()
     {
@@ -760,6 +987,8 @@ public class FileToolNegotiationTests : IDisposable
         Assert.Contains("accept=\"text/*\"", description);
         Assert.Contains("does not support pdf input", description);
         Assert.Contains("scanned PDF", description);
+        Assert.Contains("PAGE IMAGES", description);
+        Assert.Contains("leave image types out of", description);
 
         var acceptParam = method.GetParameters().Single(p => p.Name == "accept");
         Assert.Equal(typeof(string), acceptParam.ParameterType); // flat string, per the schema rule

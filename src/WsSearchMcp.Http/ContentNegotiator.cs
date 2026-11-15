@@ -13,16 +13,20 @@ public enum Delivery
     Blob,
     /// <summary>Text extracted from the file (PDF, docx, xlsx, pptx).</summary>
     ConvertedText,
+    /// <summary>PDF pages drawn as images (the client accepts images but not PDF itself).</summary>
+    RenderedImages,
 }
 
 /// <summary>
 /// Chooses the best form of a file the client said it can read. Preference order for
 /// <c>format=auto</c>: the file as text → the file natively (image block / binary resource) when its MIME
-/// type is accepted → extracted text when it can be converted → a clear error.
+/// type is accepted → for a PDF, rendered page images when the client accepts images → extracted text
+/// when it can be converted → a clear error. A client that accepts images therefore gets images, not text,
+/// for a PDF; to get text it leaves images out of <c>accept</c>.
 /// </summary>
 public static class ContentNegotiator
 {
-    public static Delivery Decide(FileKind kind, bool textLike, string? mime, string format, AcceptList accept, bool canConvert)
+    public static Delivery Decide(FileKind kind, bool textLike, string? mime, string format, AcceptList accept, bool canConvert, bool canRender = false)
     {
         // Explicit formats are an escape hatch that bypasses negotiation.
         if (format == "text") return Delivery.Text;
@@ -39,11 +43,19 @@ public static class ContentNegotiator
         if (FileClassifier.IsConvertible(kind))
         {
             if (accept.Accepts(mime)) return Delivery.Blob;
+            if (kind == FileKind.Pdf && canRender && RenderMime(accept) is not null) return Delivery.RenderedImages;
             if (canConvert) return Delivery.ConvertedText;
             throw NotDeliverable(kind, mime, accept);
         }
         return DecideBinary(kind, mime, accept);
     }
+
+    /// <summary>The image type PDF pages are rendered as: PNG if accepted, else JPEG, else WebP; null if no image type is accepted.</summary>
+    public static string? RenderMime(AcceptList accept) =>
+        accept.Accepts("image/png") ? "image/png"
+        : accept.Accepts("image/jpeg") ? "image/jpeg"
+        : accept.Accepts("image/webp") ? "image/webp"
+        : null;
 
     /// <summary>Delivery for a file that turned out to be binary data (nothing to convert it to).</summary>
     public static Delivery DecideBinary(FileKind kind, string? mime, AcceptList accept)

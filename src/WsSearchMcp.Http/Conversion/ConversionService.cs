@@ -2,6 +2,9 @@ using System.Text;
 
 namespace WsSearchMcp.Http.Conversion;
 
+/// <summary>Result of rendering pages of a PDF: its total page count and the pages that were produced.</summary>
+public sealed record RenderResult(int PageCount, IReadOnlyList<RenderedPage> Pages);
+
 /// <summary>Identifies one version of one file for the conversion cache.</summary>
 public readonly record struct ConversionKey(string Path, long Size, long LastWriteTicks)
 {
@@ -21,6 +24,8 @@ public readonly record struct ConversionKey(string Path, long Size, long LastWri
 public sealed class ConversionService
 {
     private readonly IReadOnlyList<IContentConverter> _converters;
+    private readonly IPdfRenderer? _renderer;
+    private readonly SemaphoreSlim _renderGate = new(1, 1);
     private readonly long _maxOutputChars;
 
     private readonly object _gate = new();
@@ -36,15 +41,20 @@ public sealed class ConversionService
         public required LinkedListNode<ConversionKey> Node { get; init; }
     }
 
-    public ConversionService(IEnumerable<IContentConverter> converters, ConversionOptions options, long maxOutputBytes)
+    public ConversionService(IEnumerable<IContentConverter> converters, ConversionOptions options, long maxOutputBytes,
+        IPdfRenderer? renderer = null)
     {
+        _renderer = renderer;
         _converters = converters.ToList();
         Options = options;
         _maxOutputChars = maxOutputBytes;
     }
 
     public static ConversionService CreateDefault(ConversionOptions options, long maxOutputBytes) =>
-        new(new IContentConverter[] { new PdfTextConverter(), new OoxmlTextConverter() }, options, maxOutputBytes);
+        new(new IContentConverter[] { new PdfTextConverter(), new OoxmlTextConverter() }, options, maxOutputBytes, new PdfiumRenderer());
+
+    /// <summary>True if PDF pages can be delivered as images.</summary>
+    public bool CanRender => _renderer is not null;
 
     public ConversionOptions Options { get; }
 
@@ -72,19 +82,74 @@ public sealed class ConversionService
                 throw new ConversionLimitException(
                     $"The file is {key.Size / (1024 * 1024)} MiB; files over {Options.MaxInputBytes / (1024 * 1024)} MiB are not converted to text.");
 
-            var input = new byte[key.Size];
-            source.Position = 0;
-            var done = 0;
-            while (done < input.Length)
-            {
-                var n = await source.ReadAsync(input.AsMemory(done), ct);
-                if (n == 0) break;
-                done += n;
-            }
-            if (done != input.Length) Array.Resize(ref input, done);
+            var input = await LoadInputAsync(key, source, ct);
             cached = GetOrStart(key, converter, kind, input);
         }
         return await cached.WaitAsync(ct);
+    }
+
+    /// <summary>Copies the (already policy-checked) file into memory, bounded by <see cref="ConversionOptions.MaxInputBytes"/>.</summary>
+    private async Task<byte[]> LoadInputAsync(ConversionKey key, Stream source, CancellationToken ct)
+    {
+        var input = new byte[key.Size];
+        source.Position = 0;
+        var done = 0;
+        while (done < input.Length)
+        {
+            var n = await source.ReadAsync(input.AsMemory(done), ct);
+            if (n == 0) break;
+            done += n;
+        }
+        if (done != input.Length) Array.Resize(ref input, done);
+        return input;
+    }
+
+    /// <summary>
+    /// Renders up to <paramref name="maxPages"/> pages of a PDF starting at zero-based <paramref name="firstPage"/>.
+    /// Stops early when the pages so far would exceed <paramref name="maxBytes"/> (always returns at least one page
+    /// if any is left). Rendering is serialised and runs under the conversion timeout.
+    /// </summary>
+    public async Task<RenderResult> RenderPagesAsync(ConversionKey key, Stream source, string mimeType, int firstPage, int maxPages,
+        long maxBytes, int maxDimension, int maxDpi, CancellationToken ct)
+    {
+        var renderer = _renderer ?? throw new ConversionException("This server cannot render PDF pages.");
+        if (key.Size > Options.MaxInputBytes)
+            throw new ConversionLimitException(
+                $"The file is {key.Size / (1024 * 1024)} MiB; files over {Options.MaxInputBytes / (1024 * 1024)} MiB are not rendered.");
+        var input = await LoadInputAsync(key, source, ct);
+
+        // PDFium cannot be cancelled and is not re-entrant: wait for the gate, and fail fast instead of queueing behind a hung render.
+        if (!await _renderGate.WaitAsync(Options.Timeout, ct))
+            throw new ConversionLimitException("The PDF renderer is busy; try again shortly.");
+        var work = Task.Run(() =>
+        {
+            try
+            {
+                var count = renderer.GetPageCount(input);
+                var pages = new List<RenderedPage>();
+                long bytes = 0;
+                for (var p = firstPage; p < count && pages.Count < maxPages; p++)
+                {
+                    var page = renderer.Render(input, p, mimeType, maxDimension, maxDpi);
+                    if (pages.Count > 0 && bytes + page.Data.Length > maxBytes) break;
+                    if (page.Data.Length > maxBytes)
+                        throw new ConversionLimitException("A rendered page is larger than the per-call cap of this server.");
+                    pages.Add(page);
+                    bytes += page.Data.Length;
+                }
+                return new RenderResult(count, pages);
+            }
+            finally { _renderGate.Release(); }
+        });
+        try
+        {
+            return await work.WaitAsync(Options.Timeout, ct);
+        }
+        catch (TimeoutException)
+        {
+            _ = work.ContinueWith(static t => { _ = t.Exception; }, TaskScheduler.Default);
+            throw new ConversionLimitException($"Rendering timed out after {(int)Options.Timeout.TotalSeconds} s.");
+        }
     }
 
     private Task<byte[]>? TryGet(ConversionKey key)

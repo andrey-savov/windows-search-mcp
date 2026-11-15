@@ -46,10 +46,13 @@ public sealed class FileTool
         "deliveredAs, encoding, offset, returned, nextOffset, truncated, note) followed by the content. " +
         "WHAT YOU RECEIVE DEPENDS ON 'accept': text files always come back as text. Other files come back in " +
         "their own format only if you list that MIME type in 'accept' (images as images, PDFs and the rest as a " +
-        "binary attachment); otherwise PDF, Word (docx), Excel (xlsx) and PowerPoint (pptx) files are converted to " +
-        "extracted plain text, and other types are refused with an explanation. Only list types your model can " +
+        "binary attachment). If you do not list application/pdf but do list an image type (for example image/*), a PDF is " +
+        "delivered as rendered PAGE IMAGES (offset and length then count pages, default one page per call), which " +
+        "preserves layout and works for scanned PDFs. Otherwise PDF, Word (docx), Excel (xlsx) and PowerPoint (pptx) " +
+        "files are converted to extracted plain text, and other types are refused with an explanation. Only list types your model can " +
         "really read: passing application/pdf returns the raw PDF as a binary attachment (a scanned PDF has no " +
-        "text layer). FALLBACK: if your client reports that it cannot read the returned content (for example " +
+        "text layer). To get a PDF as text even though your model reads images, leave image types out of 'accept'. " +
+        "FALLBACK: if your client reports that it cannot read the returned content (for example " +
         "'this model does not support pdf input' or an unsupported attachment/image error), call get_file again " +
         "with the same path and accept=\"text/*\"; the server then returns extracted text. " +
         "Large files: pass a modest 'length' (for example 100000) and keep calling with offset = nextOffset until " +
@@ -60,9 +63,9 @@ public sealed class FileTool
     public async Task<IEnumerable<ContentBlock>> GetFile(
         [Description("Absolute path exactly as returned by find_files (System.ItemPathDisplay), e.g. C:\\Users\\me\\Documents\\notes.txt")]
             string path,
-        [Description("Byte offset to start reading at. Default 0. For continuation use the nextOffset from the previous reply.")]
+        [Description("Byte offset to start reading at (page number, from 0, for a PDF delivered as page images). Default 0. For continuation use the nextOffset from the previous reply.")]
             long offset = 0,
-        [Description("Maximum bytes to return. Default 0 = as much as the server allows per call. Not allowed for images (always whole).")]
+        [Description("Maximum bytes to return. Default 0 = as much as the server allows per call. Images are always whole (no length); for a PDF delivered as page images this is the number of pages.")]
             long length = 0,
         [Description("'auto' (default: negotiate using 'accept'), 'text' (force the raw bytes decoded as text), or 'base64' (force a binary attachment).")]
             string format = "auto",
@@ -158,7 +161,10 @@ public sealed class FileTool
         var textLike = kind == FileKind.Unknown && encoding != FileTextEncoding.Binary;
 
         // Negotiate: the file as text, natively (if the client accepts its type), as extracted text, or refuse.
-        var delivery = ContentNegotiator.Decide(kind, textLike, mime, format, accept, _conversion.Find(kind) is not null);
+        var delivery = ContentNegotiator.Decide(kind, textLike, mime, format, accept, _conversion.Find(kind) is not null, _conversion.CanRender);
+
+        if (delivery == Delivery.RenderedImages)
+            return await RenderPdfAsync(client, indexed, stream, size, offset, length, accept, ct);
 
         if (delivery == Delivery.Image && (offset > 0 || (length > 0 && length < size) || size > cap))
             throw new McpException("Images are delivered whole, so offset and length cannot be used" +
@@ -279,6 +285,62 @@ public sealed class FileTool
                 });
                 break;
         }
+        return blocks;
+    }
+
+    /// <summary>
+    /// A PDF delivered as page images (the client accepts images but not PDF). <c>offset</c> is the first page
+    /// (zero-based) and <c>length</c> the number of pages (default 1); every page is a complete image.
+    /// </summary>
+    private async Task<IEnumerable<ContentBlock>> RenderPdfAsync(ClientRecord client, IndexedFile indexed, FileStream stream,
+        long size, long offset, long length, AcceptList accept, CancellationToken ct)
+    {
+        var renderMime = ContentNegotiator.RenderMime(accept)!;
+        var opt = _conversion.Options;
+        var maxPages = (int)Math.Min(length == 0 ? 1 : length, opt.RenderMaxPagesPerCall);
+
+        RenderResult result;
+        try
+        {
+            var key = new ConversionKey(indexed.Path, size, File.GetLastWriteTimeUtc(stream.SafeFileHandle).Ticks);
+            result = await _conversion.RenderPagesAsync(key, stream, renderMime, (int)Math.Min(offset, int.MaxValue), maxPages,
+                _options.MaxFileBytes, opt.RenderMaxDimension, opt.RenderMaxDpi, ct);
+        }
+        catch (ConversionException ex)
+        {
+            _log.LogWarning("get_file: rendering failed for client '{Client}': {Reason} path={Path}", client.Name, ex.Message, indexed.Path);
+            throw new McpException("The PDF could not be rendered as images: " + ex.Message +
+                " Call get_file again with accept=\"text/*\" to try extracting text instead.");
+        }
+
+        var next = offset + result.Pages.Count;
+        var meta = new Dictionary<string, object?>
+        {
+            ["path"] = indexed.Path,
+            ["size"] = result.PageCount,
+            ["unit"] = "pages",
+            ["sourceSize"] = size,
+            ["modified"] = indexed.Modified,
+            ["mimeType"] = renderMime,
+            ["encoding"] = "image",
+            ["offset"] = offset,
+            ["returned"] = result.Pages.Count,
+            ["nextOffset"] = next < result.PageCount ? (long?)next : null,
+            ["truncated"] = next < result.PageCount,
+            ["maxBytesPerCall"] = _options.MaxFileBytes,
+            ["accept"] = accept.Normalized,
+            ["deliveredAs"] = "rendered-images",
+            ["convertedFrom"] = "application/pdf",
+            ["pages"] = result.Pages.Select(p => new { page = p.Page, width = p.Width, height = p.Height, bytes = p.Data.Length }).ToList(),
+            ["note"] = "PDF pages drawn as images; offset and length count pages (default 1 page per call, at most " +
+                       $"{opt.RenderMaxPagesPerCall}). If your client cannot display images, call get_file again with accept=\"text/*\" to receive extracted text.",
+        };
+
+        _log.LogInformation("get_file: client '{Client}' rendered {Pages} page(s) from {Offset} of {Path}", client.Name, result.Pages.Count, offset, indexed.Path);
+
+        var blocks = new List<ContentBlock> { new TextContentBlock { Text = JsonSerializer.Serialize(meta) } };
+        foreach (var page in result.Pages)
+            blocks.Add(ImageContentBlock.FromBytes(page.Data, page.MimeType));
         return blocks;
     }
 

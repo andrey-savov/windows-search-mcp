@@ -14,6 +14,15 @@ public sealed class ConversionOptions
 
     /// <summary>Total size of cached conversion results (default 64 MiB).</summary>
     public long CacheBytes { get; init; } = 64L * 1024 * 1024;
+
+    /// <summary>Longest edge, in pixels, of a rendered PDF page (default 1568: larger images are downscaled by vision models anyway).</summary>
+    public int RenderMaxDimension { get; init; } = 1568;
+
+    /// <summary>Highest resolution used to render a PDF page (default 150 dpi).</summary>
+    public int RenderMaxDpi { get; init; } = 150;
+
+    /// <summary>Most pages returned by one get_file call when rendering (default 10; one page when the caller does not say).</summary>
+    public int RenderMaxPagesPerCall { get; init; } = 10;
 }
 
 /// <summary>A conversion failed in a way the client can be told about (the message is client-safe: no paths).</summary>

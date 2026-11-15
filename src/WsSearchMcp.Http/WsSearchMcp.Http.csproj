@@ -15,10 +15,40 @@
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.3.0" />
     <PackageReference Include="PdfPig" Version="0.1.16" />
+    <PackageReference Include="PDFtoImage" Version="5.4.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\WsSearchMcp.Core\WsSearchMcp.Core.csproj" />
   </ItemGroup>
+
+  <!--
+    PDFtoImage (PDFium) and SkiaSharp ship native assets for every platform plus a ~90 MB symbols file
+    (about 550 MB in total). This server is Windows-only, so keep only the win-x64 and win-arm64 natives
+    and no native symbol files, for both build output and publish. Items are matched on their full path,
+    which every item has; managed runtime-specific assets (not under a native folder) are left alone.
+  -->
+  <PropertyGroup>
+    <_RtSep>$([System.IO.Path]::DirectorySeparatorChar)</_RtSep>
+  </PropertyGroup>
+
+  <Target Name="PruneForeignNativeAssets" AfterTargets="ResolveLockFileCopyLocalFiles" BeforeTargets="_CopyFilesMarkedCopyLocal;ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_ForeignNative Include="@(ReferenceCopyLocalPaths)"
+                      Condition="$([System.String]::new('%(FullPath)').Contains('$(_RtSep)runtimes$(_RtSep)'))
+                                 And ( '%(Extension)' == '.pdb'
+                                       Or ( $([System.String]::new('%(FullPath)').Contains('$(_RtSep)native$(_RtSep)'))
+                                            And !$([System.String]::new('%(FullPath)').Contains('$(_RtSep)runtimes$(_RtSep)win-x64$(_RtSep)'))
+                                            And !$([System.String]::new('%(FullPath)').Contains('$(_RtSep)runtimes$(_RtSep)win-arm64$(_RtSep)')) ) )" />
+      <_ForeignNative Include="@(RuntimeTargetsCopyLocalItems)"
+                      Condition="$([System.String]::new('%(FullPath)').Contains('$(_RtSep)runtimes$(_RtSep)'))
+                                 And ( '%(Extension)' == '.pdb'
+                                       Or ( $([System.String]::new('%(FullPath)').Contains('$(_RtSep)native$(_RtSep)'))
+                                            And !$([System.String]::new('%(FullPath)').Contains('$(_RtSep)runtimes$(_RtSep)win-x64$(_RtSep)'))
+                                            And !$([System.String]::new('%(FullPath)').Contains('$(_RtSep)runtimes$(_RtSep)win-arm64$(_RtSep)')) ) )" />
+      <ReferenceCopyLocalPaths Remove="@(_ForeignNative)" />
+      <RuntimeTargetsCopyLocalItems Remove="@(_ForeignNative)" />
+    </ItemGroup>
+  </Target>
 
 </Project>

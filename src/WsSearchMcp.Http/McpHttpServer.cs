@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using WsSearchMcp.Files;
 using WsSearchMcp.Security;
 
 namespace WsSearchMcp.Http;
@@ -35,6 +36,22 @@ public sealed class McpHttpServerOptions
     public ClientUsageTracker? Usage { get; init; }
     public TimeProvider Time { get; init; } = TimeProvider.System;
 
+    /// <summary>
+    /// Per-call cap of the get_file tool in bytes (200 MiB by default). Raise it for larger single reads;
+    /// note that a reply holds the bytes plus their base64/JSON forms in memory at once.
+    /// </summary>
+    public long MaxFileBytes { get; init; } = DefaultMaxFileBytes;
+
+    /// <summary>Location of the server's own config folder (always denied to get_file). Default: the per-user folder.</summary>
+    public ServerPaths? Paths { get; init; }
+
+    /// <summary>Overrides the get_file deny list (tests only). Default: <see cref="FileAccessPolicy.CreateDefault"/>.</summary>
+    public FileAccessPolicy? FilePolicy { get; init; }
+
+    /// <summary>Overrides the Windows Search lookup used by get_file (tests only). Default: the real index.</summary>
+    public IndexedFileResolver? FileResolver { get; init; }
+
+    public const long DefaultMaxFileBytes = 200L * 1024 * 1024;
     public const int DefaultPort = 8765;
     public const long MaxRequestBodyBytes = 1024 * 1024;
 }
@@ -45,8 +62,14 @@ public sealed class McpHttpServerOptions
 /// </summary>
 public static class McpHttpServer
 {
+    /// <summary><c>HttpContext.Items</c> key holding the authenticated <see cref="ClientRecord"/>.</summary>
+    public const string ClientItemKey = "ws-search.client";
+
     public static WebApplication Build(McpHttpServerOptions options)
     {
+        if (options.MaxFileBytes <= 0)
+            throw new ArgumentException("MaxFileBytes must be positive.", nameof(options));
+
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             Args = Array.Empty<string>(), // flags are parsed by Program, never by host configuration
@@ -70,10 +93,16 @@ public static class McpHttpServer
                 kestrel.Listen(IPAddress.Parse(options.Bind), options.Port, UseTls);
         });
 
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddSingleton(options);
+        builder.Services.AddSingleton(options.FilePolicy ?? FileAccessPolicy.CreateDefault(options.Paths ?? new ServerPaths()));
+        builder.Services.AddSingleton(options.FileResolver ?? IndexedFileResolver.CreateDefault());
+
         builder.Services
             .AddMcpServer()
             .WithHttpTransport(o => o.Stateless = true)
-            .WithToolsFromAssembly(typeof(WindowsSearchTool).Assembly);
+            .WithToolsFromAssembly(typeof(WindowsSearchTool).Assembly) // search + property tools (shared with stdio)
+            .WithTools<FileTool>();                                    // get_file: HTTPS only, never registered by stdio
 
         var app = builder.Build();
         var log = app.Logger;
@@ -107,6 +136,7 @@ public static class McpHttpServer
                 return;
             }
 
+            ctx.Items[ClientItemKey] = result.Client;
             options.Usage?.Touch(result.Client!.Kid, now);
             log.LogInformation("Client '{Client}' {Method} {Path}", result.Client!.Name, ctx.Request.Method, ctx.Request.Path);
             await next();

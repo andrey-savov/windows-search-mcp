@@ -13,6 +13,7 @@ public sealed class WindowsCertClientStore : IClientStore
     public const string DefaultStoreName = "WsSearchMcp.Clients";
 
     private static readonly Regex KidInSubject = new(@"OU=([0-9a-fA-F]{32})", RegexOptions.Compiled);
+    private static readonly Regex PermInSubject = new(@"OU=" + ClientPermissions.SubjectPrefix + @"([a-z0-9_-]+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // Certificates for clients whose tokens never expire are given this validity.
     private static readonly TimeSpan NeverValidity = TimeSpan.FromDays(365.25 * 100);
@@ -45,7 +46,13 @@ public sealed class WindowsCertClientStore : IClientStore
                     cert.GetNameInfo(X509NameType.SimpleName, false),
                     created,
                     expires,
-                    cert.Export(X509ContentType.Cert)));
+                    cert.Export(X509ContentType.Cert))
+                {
+                    // Unknown permission names (e.g. from a newer version) are ignored, never granted.
+                    Permissions = PermInSubject.Matches(cert.Subject)
+                        .Select(pm => pm.Groups[1].Value.ToLowerInvariant())
+                        .Where(ClientPermissions.IsKnown).Distinct().OrderBy(p => p, StringComparer.Ordinal).ToList(),
+                });
             }
         }
         return result;

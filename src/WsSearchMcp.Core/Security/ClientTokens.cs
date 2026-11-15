@@ -28,10 +28,17 @@ public static class ClientTokens
 
     /// <summary>Mints a client, stores its public key, and returns the token (shown once).</summary>
     /// <param name="lifetime">Token lifetime; <c>null</c> means the token never expires.</param>
-    public static MintResult Mint(IClientStore store, string name, TimeSpan? lifetime, DateTimeOffset now)
+    /// <param name="permissions">Extra permissions (see <see cref="ClientPermissions"/>); <c>null</c> = search only.</param>
+    public static MintResult Mint(IClientStore store, string name, TimeSpan? lifetime, DateTimeOffset now,
+        IEnumerable<string>? permissions = null)
     {
         if (!ClientNames.TryNormalize(name, out var normalized, out var error))
             throw new ArgumentException(error, nameof(name));
+        var perms = (permissions ?? Array.Empty<string>())
+            .Select(p => p.Trim().ToLowerInvariant()).Distinct().OrderBy(p => p, StringComparer.Ordinal).ToList();
+        var unknown = perms.FirstOrDefault(p => !ClientPermissions.IsKnown(p));
+        if (unknown is not null)
+            throw new ArgumentException($"Unknown permission '{unknown}'.", nameof(permissions));
         if (lifetime is { } l && l <= TimeSpan.Zero)
             throw new ArgumentException("Lifetime must be positive.", nameof(lifetime));
         if (store.FindByName(normalized) is not null)
@@ -45,7 +52,9 @@ public static class ClientTokens
 
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
-        var request = new CertificateRequest($"CN={normalized}, OU={kid}", key, HashAlgorithmName.SHA256);
+        // Permissions ride in the (public) certificate subject as extra OU=perm:<name> RDNs.
+        var subject = $"CN={normalized}, OU={kid}" + string.Concat(perms.Select(p => $", OU={ClientPermissions.SubjectPrefix}{p}"));
+        var request = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);
         var validity = WindowsCertClientStore.ValidityFor(now, expires);
         byte[] certDer;
         using (var cert = request.CreateSelfSigned(now, now + validity))
@@ -67,7 +76,7 @@ public static class ClientTokens
             DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
         var token = signingInput + "." + Base64Url.EncodeToString(signature);
 
-        var record = new ClientRecord(kid, normalized, now, expires, certDer);
+        var record = new ClientRecord(kid, normalized, now, expires, certDer) { Permissions = perms };
         store.Add(record);
         return new MintResult(token, record);
         // `key` (the private key) is disposed here and never persisted.

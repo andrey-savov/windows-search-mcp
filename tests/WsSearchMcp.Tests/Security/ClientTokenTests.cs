@@ -208,6 +208,49 @@ public class ClientTokenTests
         Assert.False(ClientTokens.Validate(new string('a', ClientTokens.MaxTokenLength + 1), new InMemoryClientStore(), Now).Ok);
     }
 
+    [Fact]
+    public void Clients_are_search_only_by_default_and_files_is_opt_in()
+    {
+        var store = new InMemoryClientStore();
+        var plain = ClientTokens.Mint(store, "plain", null, Now);
+        var reader = ClientTokens.Mint(store, "reader", null, Now, new[] { ClientPermissions.Files });
+
+        Assert.Empty(plain.Client.Permissions);
+        Assert.False(plain.Client.HasPermission(ClientPermissions.Files));
+        Assert.Equal(new[] { "files" }, reader.Client.Permissions);
+        Assert.True(reader.Client.HasPermission("FILES")); // case-insensitive
+
+        // Validation returns the stored record, so the server sees the permission.
+        Assert.True(ClientTokens.Validate(reader.Token, store, Now).Client!.HasPermission(ClientPermissions.Files));
+        Assert.False(ClientTokens.Validate(plain.Token, store, Now).Client!.HasPermission(ClientPermissions.Files));
+    }
+
+    [Fact]
+    public void Permissions_are_not_carried_in_the_token_so_the_token_format_is_unchanged()
+    {
+        var store = new InMemoryClientStore();
+        var m = ClientTokens.Mint(store, "reader", null, Now, new[] { "files" });
+        var payload = Encoding.UTF8.GetString(Base64Url.DecodeFromChars(m.Token.Split('.')[1]));
+        Assert.DoesNotContain("files", payload);
+        Assert.DoesNotContain("perm", payload);
+    }
+
+    [Fact]
+    public void Unknown_permissions_are_rejected_and_duplicates_collapse()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            ClientTokens.Mint(new InMemoryClientStore(), "x", null, Now, new[] { "root" }));
+        var m = ClientTokens.Mint(new InMemoryClientStore(), "y", null, Now, new[] { "files", "FILES", " files " });
+        Assert.Equal(new[] { "files" }, m.Client.Permissions);
+    }
+
+    [Fact]
+    public void Describe_formats_the_access_column()
+    {
+        Assert.Equal("search", ClientPermissions.Describe(Array.Empty<string>()));
+        Assert.Equal("search+files", ClientPermissions.Describe(new[] { "files" }));
+    }
+
     /// <summary>Registers a client and signs an arbitrary payload with its key (test-only).</summary>
     private static (string token, ClientRecord record) ForgeSigned(InMemoryClientStore store, string aud, long? expUnix)
     {

@@ -44,6 +44,35 @@ public class WindowsCertClientStoreTests : IDisposable
     }
 
     [Fact]
+    public void Permissions_survive_the_store_and_legacy_certificates_have_none()
+    {
+        var reader = ClientTokens.Mint(_store, "reader", TimeSpan.FromDays(5), Now, new[] { ClientPermissions.Files });
+        var plain = ClientTokens.Mint(_store, "plain", TimeSpan.FromDays(5), Now);
+
+        var byName = _store.List().ToDictionary(c => c.Name);
+        Assert.Equal(new[] { "files" }, byName["reader"].Permissions);
+        Assert.Empty(byName["plain"].Permissions);
+        Assert.True(ClientTokens.Validate(reader.Token, _store, Now.AddMinutes(1)).Client!.HasPermission("files"));
+        Assert.False(ClientTokens.Validate(plain.Token, _store, Now.AddMinutes(1)).Client!.HasPermission("files"));
+        Assert.Equal(reader.Client.Fingerprint, byName["reader"].Fingerprint);
+    }
+
+    [Fact]
+    public void Unknown_permission_names_found_in_a_certificate_are_ignored_not_granted()
+    {
+        // A certificate written by some other/newer version: a known and an unknown permission.
+        using var key = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+        var kid = Guid.NewGuid().ToString("N");
+        var req = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+            $"CN=other, OU={kid}, OU=perm:files, OU=perm:admin", key, System.Security.Cryptography.HashAlgorithmName.SHA256);
+        using var cert = req.CreateSelfSigned(Now.AddDays(-1), Now.AddDays(5));
+        _store.Add(new ClientRecord(kid, "other", Now.AddDays(-1), Now.AddDays(5),
+            cert.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Cert)));
+
+        Assert.Equal(new[] { "files" }, Assert.Single(_store.List()).Permissions);
+    }
+
+    [Fact]
     public void Stored_certificates_have_no_private_key()
     {
         ClientTokens.Mint(_store, "pubonly", null, Now);

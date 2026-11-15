@@ -54,9 +54,9 @@ mcp__ws-search__find_files(text="contract", scope="", maxResults=20)
 
 | Project | Output | Role |
 |---------|--------|------|
-| `src/WsSearchMcp.Core` | library | The tools (`WindowsSearchTool`, `WindowsPropertySystem`, `Diag`) and the `WsSearchMcp.Security` namespace (tokens, client stores, certificates, paths). No ASP.NET dependency. |
+| `src/WsSearchMcp.Core` | library | The tools (`WindowsSearchTool`, `WindowsPropertySystem`, `Diag`), the `WsSearchMcp.Security` namespace (tokens, client stores, permissions, certificates, paths) and the `WsSearchMcp.Files` namespace (`FileAccessPolicy` deny list, `IndexedFileResolver`, `NativeFilePath`). No ASP.NET dependency. |
 | `ws-search-mcp.csproj` (repo root) | `ws-search-mcp.exe` | stdio MCP server + `--tool` debug mode. **Name, path and behaviour must not change** — local clients register this exe. |
-| `src/WsSearchMcp.Http` | `ws-search-mcp-http.exe` | Authenticated HTTPS MCP server (ASP.NET Core/Kestrel, `ModelContextProtocol.AspNetCore`). |
+| `src/WsSearchMcp.Http` | `ws-search-mcp-http.exe` | Authenticated HTTPS MCP server (ASP.NET Core/Kestrel, `ModelContextProtocol.AspNetCore`). Also owns the HTTPS-only `get_file` tool (`FileTool`, `FileChunking`). |
 | `src/WsSearchMcp.Admin` | `ws-search-mcp-admin.exe` | Local CLI: `client mint/list/revoke`, `cert init/show/export/renew/use`. Logic is in the testable `AdminCli` class. |
 
 The root `ws-search-mcp.csproj` must `Compile Remove="src\**\*.cs"` (and `tests\**`) or it will compile the sibling projects' sources. Tools are discovered with `WithToolsFromAssembly(typeof(WindowsSearchTool).Assembly)` because they no longer live in the entry assembly.
@@ -71,6 +71,18 @@ The root `ws-search-mcp.csproj` must `Compile Remove="src\**\*.cs"` (and `tests\
 - `IClientStore`: `WindowsCertClientStore` (`CurrentUser\WsSearchMcp.Clients`), `InMemoryClientStore` (tests), `CachingClientStore` (3 s TTL so out-of-process revocation takes effect without restart). Revoked clients are *removed*, so `client list` never shows them.
 - Server TLS cert: ECDSA P-256 with a persisted, **non-exportable** CNG key in `CurrentUser\My`; thumbprint in `%APPDATA%\ws-search-mcp\config.json` (override dir with `WS_SEARCH_HOME`; directory ACL = user + SYSTEM). `usage.json` holds throttled per-client last-used times.
 - The server and admin tool must run as the same Windows user (shared per-user stores) and the server must run as the signed-in user so Windows Search returns that user's index.
+
+### `get_file` (HTTPS only) — invariants
+
+`FileTool` (in `src/WsSearchMcp.Http`, registered with `.WithTools<FileTool>()`) returns file contents. It must **never** be registered by the stdio exe or live in Core: `WithToolsFromAssembly(Core)` would then expose it over stdio (`StdioToolSetTests` guards this).
+
+- **Permission is per client and server-side.** `ClientRecord.Permissions` (currently only `files`) is stored in the client certificate subject as `OU=perm:files`; the token format carries no permissions. Unknown permission names in a certificate are ignored, never granted. Clients minted without `--files`, and all pre-existing clients, have none. The auth middleware puts the validated `ClientRecord` in `HttpContext.Items[McpHttpServer.ClientItemKey]`; the tool reads it via `IHttpContextAccessor` (works because `Stateless = true`; do not enable `PerSessionExecutionContext`).
+- **Order of checks:** permission → argument validation → `FileAccessPolicy.CheckPathText` (before the index is touched, so denied paths never reveal existence) → `IndexedFileResolver` (the index is the allowlist and supplies the canonical path that is opened) → open → `CheckAttributes` + `NativeFilePath.GetFinalPath` (`GetFinalPathNameByHandle`) → `Check(finalPath, stream)` (text, attributes, private-key content sniff). Never open the caller's string; never skip the post-open check — it is what stops a junction/symlink in a *parent* folder.
+- **The deny list is absolute and structural** (`FileAccessPolicy`): any dot-prefixed component at any depth; any Hidden/System component up the path (the volume/share root is skipped — `C:\` is Hidden+System; compare without the trailing `\` that `Path.GetDirectoryName` leaves on it); protected roots (every profile's AppData, ProgramData, Windows, `ServerPaths.Root`); credential-style names; `.pem`/`.key` containing `PRIVATE KEY`. It never consults the index. Client-facing errors carry only `PolicyDecision.Category`; the path/detail go to the server log.
+- `IndexedFileResolver` reuses `WindowsSearchTool.Search` through a delegate (no new SQL; tests inject a fake). It falls back to a `System.FileName` + `DP://` query because `find_files` repairs empty `ItemPathDisplay` values from `DP://` URLs.
+- Chunking is character-safe (`FileChunking`): UTF-8 and UTF-16 (BOM) text never split a character, `nextOffset` always lands on a boundary, and encoding is judged from the file head so every chunk of a file is treated alike. UTF-16 text legitimately contains NULs — only apply the "NUL means binary" rule to UTF-8.
+- Per-call cap: `McpHttpServerOptions.MaxFileBytes` (default 200 MiB), `--max-file-mb` / `config.json` `maxFileBytes`. The blob URI label uses the index's canonical path (`new Uri(@"\?\C:\...")` throws).
+- Tests build fixtures under `AppData\Local\Temp`, which the real policy would deny, so they use `FileAccessPolicy`'s internal constructor with an *exempt base* (`TempTree.Policy()`); never loosen the production policy for tests. `HttpServerFixture` injects a `FakeIndex` resolver and that policy via `McpHttpServerOptions`.
 
 ### Three MCP tools (src/WsSearchMcp.Core/WindowsSearchTool.cs)
 
@@ -115,4 +127,4 @@ If you add parameters to this tool, keep them as plain `string` / `int` / `bool`
 
 `tests/WsSearchMcp.Tests/WindowsSearchToolTests.cs` tests `BuildSql()` and `ListProperties*()` only — pure logic with no COM or ADODB calls. There are no integration tests against the live Windows Search index.
 
-The security/HTTP tests also avoid COM: `HttpServerTests` run `McpHttpServer` in-process on an ephemeral port with a throwaway certificate and an `InMemoryClientStore`, and dispatch only `list_properties`. `WindowsCertClientStoreTests` use a uniquely named throwaway certificate store (deleted on dispose) — never the real `WsSearchMcp.Clients` store or the user's `CurrentUser\My`. The test project needs the `Microsoft.AspNetCore.App` framework reference.
+The security/HTTP tests also avoid COM: `HttpServerTests` run `McpHttpServer` in-process on an ephemeral port with a throwaway certificate and an `InMemoryClientStore`, and dispatch only `list_properties`. `WindowsCertClientStoreTests` use a uniquely named throwaway certificate store (deleted on dispose) — never the real `WsSearchMcp.Clients` store or the user's `CurrentUser\My`. `FileToolTests` / `HttpFileToolTests` / `FileAccessPolicyTests` use real temp files (incl. a `mklink /J` junction) with a `FakeIndex` that "indexes" whatever exists on disk, so `get_file` is tested end to end without COM. The test project needs the `Microsoft.AspNetCore.App` framework reference.

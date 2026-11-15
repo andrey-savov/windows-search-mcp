@@ -66,6 +66,64 @@ public class AdminCliTests : IDisposable
     }
 
     [Fact]
+    public void Mint_files_flag_grants_file_access_and_the_default_does_not()
+    {
+        var plain = Run("client", "mint", "plain");
+        Assert.Equal(0, plain.code);
+        Assert.Contains("access: search)", plain.stderr);
+
+        var reader = Run("client", "mint", "reader", "--files");
+        Assert.Equal(0, reader.code);
+        Assert.Contains("access: search+files", reader.stderr);
+
+        var byName = _store.List().ToDictionary(c => c.Name);
+        Assert.False(byName["plain"].HasPermission("files"));
+        Assert.True(byName["reader"].HasPermission("files"));
+        // The flag may appear before or after the name and never ends up in stdout.
+        Assert.Equal(0, Run("client", "mint", "--files", "first").code);
+        Assert.True(_store.FindByName("first")!.HasPermission("files"));
+        Assert.DoesNotContain("files", reader.stdout);
+    }
+
+    [Fact]
+    public void List_shows_an_ACCESS_column_and_json_permissions()
+    {
+        Run("client", "mint", "plain");
+        Run("client", "mint", "reader", "--files");
+
+        var table = Run("client", "list").stdout.Split((char)10, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Contains("ACCESS", table[0]);
+        var plainRow = table.Single(l => l.StartsWith("plain"));
+        var readerRow = table.Single(l => l.StartsWith("reader"));
+        Assert.Contains("search+files", readerRow);
+        Assert.DoesNotContain("+files", plainRow);
+
+        using var doc = JsonDocument.Parse(Run("client", "list", "--json").stdout);
+        var rows = doc.RootElement.EnumerateArray().ToDictionary(r => r.GetProperty("name").GetString()!);
+        Assert.Equal(0, rows["plain"].GetProperty("permissions").GetArrayLength());
+        Assert.Equal("files", rows["reader"].GetProperty("permissions")[0].GetString());
+    }
+
+    [Fact]
+    public void Clients_stored_before_permissions_existed_list_as_search_only()
+    {
+        // A record exactly as an older version stored it: no permissions.
+        var legacy = ClientTokens.Mint(_store, "legacy", null, DateTimeOffset.UtcNow).Client;
+        Assert.Empty(legacy.Permissions);
+        var row = Run("client", "list").stdout.Split((char)10, StringSplitOptions.RemoveEmptyEntries).Single(l => l.StartsWith("legacy"));
+        Assert.Contains("search", row);
+        Assert.DoesNotContain("files", row);
+    }
+
+    [Fact]
+    public void Unknown_mint_flags_are_rejected()
+    {
+        var r = Run("client", "mint", "x", "--admin");
+        Assert.NotEqual(0, r.code);
+        Assert.Empty(_store.List());
+    }
+
+    [Fact]
     public void List_with_no_clients()
     {
         var (code, stdout, _) = Run("client", "list");

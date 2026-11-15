@@ -14,6 +14,15 @@ public sealed record ClientRecord(
     DateTimeOffset? Expires,
     byte[] CertificateDer)
 {
+    /// <summary>
+    /// Extra capabilities beyond searching (see <see cref="ClientPermissions"/>). Every client may
+    /// search; clients minted before permissions existed have none.
+    /// </summary>
+    public IReadOnlyList<string> Permissions { get; init; } = Array.Empty<string>();
+
+    public bool HasPermission(string permission) =>
+        Permissions.Contains(permission, StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Short fingerprint (SHA-256 of the public key, first 8 bytes, hex) for display.</summary>
     public string Fingerprint
     {

@@ -15,7 +15,9 @@ public static class AdminCli
         Run as the same Windows user as ws-search-mcp-http (both use that user's stores).
 
         Clients:
-          client mint <name> [--expires 365d|never]   Create a client; prints its token ONCE
+          client mint <name> [--expires 365d|never] [--files]
+                                                      Create a client; prints its token ONCE.
+                                                      --files also lets it read file contents (get_file)
           client list [--json]                        List current (unrevoked) clients
           client revoke <name>                        Revoke a client (takes effect immediately)
 
@@ -27,6 +29,7 @@ public static class AdminCli
           cert use <thumbprint>                       Use a CA-issued certificate from CurrentUser\My
 
         Client names: 1-64 characters; letters, digits, spaces, '-', '_' and '.'.
+        Permissions are fixed at mint time; to change them, mint a new client and revoke the old one.
         """;
 
     public static int Run(string[] args, TextWriter output, TextWriter error,
@@ -72,9 +75,11 @@ public static class AdminCli
     {
         string? name = null;
         TimeSpan? lifetime = ClientTokens.DefaultLifetime;
+        var permissions = new List<string>();
         for (var i = 0; i < args.Length; i++)
         {
-            if (args[i] == "--expires" && i + 1 < args.Length)
+            if (args[i] == "--files") permissions.Add(ClientPermissions.Files);
+            else if (args[i] == "--expires" && i + 1 < args.Length)
             {
                 if (!TryParseLifetime(args[++i], out lifetime))
                     return Fail(error, "Invalid --expires value. Use e.g. 90d, 365d or never.");
@@ -82,13 +87,14 @@ public static class AdminCli
             else if (name is null && !args[i].StartsWith("--")) name = args[i];
             else return Fail(error, $"Unexpected argument '{args[i]}'.");
         }
-        if (name is null) return Fail(error, "Usage: client mint <name> [--expires 365d|never]");
+        if (name is null) return Fail(error, "Usage: client mint <name> [--expires 365d|never] [--files]");
 
-        var result = ClientTokens.Mint(store, name, lifetime, time.GetUtcNow());
+        var result = ClientTokens.Mint(store, name, lifetime, time.GetUtcNow(), permissions);
 
         // Everything except the token goes to stderr so `mint` output can be captured cleanly.
         error.WriteLine($"Created client '{result.Client.Name}' (key {result.Client.Fingerprint}, " +
-                        $"{(result.Client.Expires is { } e ? $"expires {e:yyyy-MM-dd}" : "never expires")}).");
+                        $"{(result.Client.Expires is { } e ? $"expires {e:yyyy-MM-dd}" : "never expires")}, " +
+                        $"access: {ClientPermissions.Describe(result.Client.Permissions)}).");
         error.WriteLine("Token (shown once — it cannot be recovered; store it securely):");
         output.WriteLine(result.Token);
         return 0;
@@ -125,6 +131,7 @@ public static class AdminCli
                 created = c.Created,
                 expires = c.Expires,
                 expired = c.IsExpired(now),
+                permissions = c.Permissions,
                 lastUsed = usage.TryGetValue(c.Kid, out var lu) ? (DateTimeOffset?)lu : null,
                 fingerprint = c.Fingerprint,
             });
@@ -141,12 +148,13 @@ public static class AdminCli
         var table = clients.Select(c => new[]
         {
             c.Name,
+            ClientPermissions.Describe(c.Permissions),
             c.Created.ToString("yyyy-MM-dd"),
             c.Expires is { } e ? e.ToString("yyyy-MM-dd") + (c.IsExpired(now) ? " EXPIRED" : "") : "never",
             usage.TryGetValue(c.Kid, out var last) ? last.ToLocalTime().ToString("yyyy-MM-dd HH:mm") : "never",
             c.Fingerprint,
         }).ToList();
-        var headers = new[] { "NAME", "CREATED", "EXPIRES", "LAST USED", "KEY" };
+        var headers = new[] { "NAME", "ACCESS", "CREATED", "EXPIRES", "LAST USED", "KEY" };
         var widths = headers.Select((h, i) => Math.Max(h.Length, table.Max(r => r[i].Length))).ToArray();
         string Line(string[] cells) => string.Join("  ", cells.Select((c, i) => c.PadRight(widths[i]))).TrimEnd();
         output.WriteLine(Line(headers));

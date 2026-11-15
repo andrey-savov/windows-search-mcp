@@ -9,6 +9,7 @@ Built on `ADODB.Connection` + `Search.CollatorDSO` (the same query engine the St
 - **`find_files`** — full-text + filename matching with structured filters on any indexed `System.*` property, optional directory scope, ordering, and result cap.
 - **`list_properties_by_family`** — enumerate properties in a family (`Photo`, `Music`, `Video`, `Document`, `GPS`, `Message`, `Contact`, …).
 - **`list_properties`** — substring search across all ~600 properties registered on the machine (canonical name + display name).
+- **`get_file`** — *HTTPS server only, opt-in per client.* Retrieve a file's contents by the path the index reports. See [Retrieving files](#retrieving-files-get_file).
 
 ## Requirements
 
@@ -140,8 +141,8 @@ The server listens on **all interfaces** by default; use the firewall (or `--bin
 
 | Command | Purpose |
 |---------|---------|
-| `client mint <name> [--expires 365d\|never]` | Create a client. Prints its token once (progress goes to stderr, so `mint > token.txt` captures only the token). |
-| `client list [--json]` | List **current** (unrevoked) clients: name, created, expires (`EXPIRED` if past), last used, key fingerprint. |
+| `client mint <name> [--expires 365d\|never] [--files]` | Create a client. Prints its token once (progress goes to stderr, so `mint > token.txt` captures only the token). `--files` also lets it read file contents with `get_file`; without it the client can only search. |
+| `client list [--json]` | List **current** (unrevoked) clients: name, access (`search` or `search+files`), created, expires (`EXPIRED` if past), last used, key fingerprint. |
 | `client revoke <name>` | Revoke a client; it is rejected within seconds, **no server restart needed**. |
 | `cert init [--san <dns-or-ip>]... [--force]` | Create the self-signed certificate. Default names: `localhost`, machine name, FQDN, `127.0.0.1`, `::1`, current IPs. |
 | `cert show` / `cert export <path.pem\|.cer>` | Inspect, or write the **public** certificate. |
@@ -155,6 +156,30 @@ Client names are the human-friendly identifier: 1–64 characters (letters, digi
 `client mint` generates a fresh P-256 key pair, signs a token (an ES256 JWT carrying the client name, audience and expiry; 365 days by default) with the private key, then **discards the private key**. Only the *public* key is kept, as a public-only certificate in `CurrentUser\WsSearchMcp.Clients` (inspect with `certmgr.msc`). The server therefore can verify tokens but can never forge one, and reading the server's storage yields nothing a client can present. Rotation = mint a new client, then revoke the old one. Treat the token itself as a password on the client side (an environment variable, not a checked-in file).
 
 The server's TLS private key is non-exportable and stays in `CurrentUser\My`. Configuration (`config.json`) and last-used timestamps (`usage.json`) live in `%APPDATA%\ws-search-mcp`, ACL'd to your user and SYSTEM. Set `WS_SEARCH_HOME` to relocate them.
+
+### Retrieving files (`get_file`)
+
+The Windows Search index holds file *names and metadata*; `get_file` reads the actual **contents** from disk, as the signed-in user, for a path the index reports. It exists **only on `ws-search-mcp-http.exe`** — the stdio server never offers it — and only clients minted with `--files` may call it. Clients minted before this feature (including their existing tokens) have search access only until you mint a new client with `--files` and revoke the old one.
+
+```powershell
+& "$bin\ws-search-mcp-admin.exe" client mint "Work laptop" --files
+```
+
+`get_file(path, offset = 0, length = 0, format = "auto")` — pass `path` exactly as `find_files` returned it (`System.ItemPathDisplay`).
+
+- **Reply:** a JSON metadata block (`path`, `size`, `modified`, `mimeType`, `encoding`, `offset`, `returned`, `nextOffset`, `truncated`, `maxBytesPerCall`) followed by the content. Text (UTF-8, or UTF-16 with a BOM) comes back as text, complete images as images, everything else as a base64 blob. `format` can force `text` or `base64`.
+- **Paging:** large files are read in chunks. Pass a modest `length` (for example 100000) and keep calling with `offset = nextOffset` until `nextOffset` is `null`. Chunks never split a character. AI clients cap tool output far below the server's limit (Claude Code defaults to about 25k tokens, adjustable with `MAX_MCP_OUTPUT_TOKENS`), so small chunks are the practical way to read big files.
+- **Server cap:** one call returns at most **200 MiB** by default. Change it with `ws-search-mcp-http.exe --max-file-mb N` or `"maxFileBytes"` (bytes) in `config.json`; the flag wins. A reply holds the bytes plus their base64 and JSON forms in memory at once, so a single maximum-size read can use close to 1 GB of RAM — raise the cap with care, and prefer paging.
+- **Index = allowlist.** Only files the index knows about can be read, and the path that gets opened is the index's canonical one, never the caller's string. Entries the index stores only as `DP://` links are matched through their file name.
+- **Deny list (always on, regardless of the index).** These are refused even for a client with `--files`:
+  - any file or folder whose **name starts with `.`**, at any depth (`.git`, `.ssh`, `.venv`, `.npmrc`, ...);
+  - any **hidden or system** file, or anything inside a hidden or system folder, at any depth;
+  - everything under **AppData** (every user's), **ProgramData**, **Windows**, and the server's own configuration folder (`%APPDATA%\ws-search-mcp` or `WS_SEARCH_HOME`), even if made visible;
+  - credential-style names: `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*` (not `.pub`), `*.pfx`, `*.p12`, `*.ppk`, `*.kdbx`, `NTUSER.DAT*`;
+  - `.pem` / `.key` files containing a `PRIVATE KEY`.
+
+  The check runs on the requested path, again on the index's path, and finally on where the opened handle really points, so a junction or symlink in any parent folder cannot lead into a denied location. `find_files` still lists such paths; only `get_file` refuses them. Refusals tell the client the category, not the path, and are logged on the server.
+- OneDrive "online-only" files are downloaded when opened, so the first read can be slow. Files another program has open for writing can still be read.
 
 ### Connecting clients
 
@@ -218,7 +243,7 @@ Import-Certificate -FilePath "$HOME\ws-search-server.pem" -CertStoreLocation Cer
 
 - **Run as the user whose index you want.** Windows Search security-trims results to the identity of the server process, so `ws-search-mcp-http.exe` runs as the signed-in user (a logon task, not a Windows service). It stops at sign-out. A service/SYSTEM account would see a different, or no, per-user scope; that is not supported.
 - **`ws-search-mcp-admin` must run as the same user** as the server (they share that user's certificate stores and `%APPDATA%`). Anyone who can run code as that user can mint clients; the Windows account is the trust boundary.
-- **Anyone with a valid token can search your whole index** (everything your user can see, including file names and indexed content). Scope tokens per device, set `--expires`, and revoke promptly.
+- **Anyone with a valid token can search your whole index** (every indexed path, plus any columns they ask for). **Reading file contents is a stronger privilege** and is granted per client with `--files`. Scope tokens per device, set `--expires`, and revoke promptly. Permissions are fixed at mint time; to change them, mint a new client and revoke the old one.
 - The server rejects requests carrying a browser `Origin` header (allow-list in `config.json` → `allowedOrigins`, empty by default), limits bodies to 1 MB, and logs failed authentication with the caller's IP and a reason — never the token.
 - `install.ps1` stops running `ws-search-mcp*` processes before publishing, including a manually started HTTP server; with `-RegisterHttpTask` (or an existing task) it restarts the task afterwards.
 - The task shows a console window at logon. Windows Firewall will prompt on first listen unless you created a rule.

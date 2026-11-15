@@ -5,8 +5,10 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
+using WsSearchMcp.Files;
 using WsSearchMcp.Http;
 using WsSearchMcp.Security;
+using WsSearchMcp.Tests.Files;
 using Xunit;
 
 namespace WsSearchMcp.Tests;
@@ -18,6 +20,9 @@ namespace WsSearchMcp.Tests;
 public sealed class HttpServerFixture : IAsyncLifetime
 {
     public InMemoryClientStore Store { get; } = new();
+
+    /// <summary>Files served by get_file in the integration tests; every file here counts as "indexed".</summary>
+    public TempTree Files { get; } = new();
     public int Port { get; private set; }
     public string Base => $"https://localhost:{Port}/";
     public HttpClient Http { get; private set; } = null!;
@@ -43,6 +48,8 @@ public sealed class HttpServerFixture : IAsyncLifetime
             Port = Port,
             Bind = "127.0.0.1",
             AllowedOrigins = new[] { "https://allowed.example" },
+            FilePolicy = Files.Policy(),
+            FileResolver = new FakeIndex().Resolver,
         });
         await _app.StartAsync();
 
@@ -59,10 +66,12 @@ public sealed class HttpServerFixture : IAsyncLifetime
         await _app.StopAsync();
         await _app.DisposeAsync();
         _cert.Dispose();
+        Files.Dispose();
     }
 
-    public string Mint(string name) =>
-        ClientTokens.Mint(Store, name, TimeSpan.FromDays(1), DateTimeOffset.UtcNow).Token;
+    public string Mint(string name, bool files = false) =>
+        ClientTokens.Mint(Store, name, TimeSpan.FromDays(1), DateTimeOffset.UtcNow,
+            files ? new[] { ClientPermissions.Files } : null).Token;
 
     public async Task<HttpResponseMessage> PostAsync(string json, string? token, string? origin = null, string? authScheme = "Bearer")
     {
@@ -195,8 +204,14 @@ public class HttpServerTests : IClassFixture<HttpServerFixture>
         var token = _s.Mint("big-body");
         var huge = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"x\":\"" +
                    new string('a', (int)McpHttpServerOptions.MaxRequestBodyBytes + 1024) + "\"}}";
-        var r = await _s.PostAsync(huge, token);
-        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, r.StatusCode);
+        // Kestrel answers 413, but it may also drop the connection while the client is still sending the
+        // oversized body. Either way the request must not be processed.
+        try
+        {
+            var r = await _s.PostAsync(huge, token);
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, r.StatusCode);
+        }
+        catch (HttpRequestException) { /* connection closed by the server */ }
     }
 }
 

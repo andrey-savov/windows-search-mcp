@@ -65,6 +65,9 @@ public sealed class ServerConfig
     /// <summary>Browser origins allowed to call the server. Empty by default (all browser origins rejected).</summary>
     public List<string> AllowedOrigins { get; set; } = new();
 
+    /// <summary>Per-call cap for the get_file tool in bytes. Unset = the server default (200 MiB).</summary>
+    public long? MaxFileBytes { get; set; }
+
     public static ServerConfig Load(ServerPaths paths) =>
         ServerPaths.ReadJson<ServerConfig>(paths.ConfigFile) ?? new ServerConfig();
 

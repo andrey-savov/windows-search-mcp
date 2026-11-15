@@ -69,7 +69,7 @@ builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
 builder.Services
     .AddMcpServer()
     .WithStdioServerTransport()
-    .WithToolsFromAssembly();
+    .WithToolsFromAssembly(typeof(WindowsSearchTool).Assembly);
 
 await builder.Build().RunAsync();
 return 0;

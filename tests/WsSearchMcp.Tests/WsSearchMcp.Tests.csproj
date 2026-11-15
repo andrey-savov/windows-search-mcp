@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>WsSearchMcp.Tests</AssemblyName>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,7 +20,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\ws-search-mcp.csproj" />
+    <ProjectReference Include="..\..\src\WsSearchMcp.Core\WsSearchMcp.Core.csproj" />
+    <ProjectReference Include="..\..\src\WsSearchMcp.Http\WsSearchMcp.Http.csproj" />
+    <ProjectReference Include="..\..\src\WsSearchMcp.Admin\WsSearchMcp.Admin.csproj" />
   </ItemGroup>
 
 </Project>

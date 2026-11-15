@@ -24,10 +24,19 @@ cd windows-search-mcp
 ./install.ps1
 ```
 
-Publishes the binary to `%LOCALAPPDATA%\Programs\ws-search-mcp\ws-search-mcp.exe`. Flags:
+Publishes three executables side by side into `%LOCALAPPDATA%\Programs\ws-search-mcp\`:
+
+| Executable | Purpose |
+|------------|---------|
+| `ws-search-mcp.exe` | The MCP server for **local** clients over stdio. Unchanged; this is what the per-tool registrations below use. |
+| `ws-search-mcp-http.exe` | Optional authenticated **HTTPS** MCP server for network clients. See [Network hosting](#network-hosting-https). |
+| `ws-search-mcp-admin.exe` | Local tool that mints/revokes network clients and manages the HTTPS certificate. |
+
+Flags:
 
 | Flag | Purpose |
 |------|---------|
+| `-RegisterHttpTask` | Also register a per-user Scheduled Task that starts `ws-search-mcp-http.exe` at logon (and restarts it on reinstall). |
 | `-SelfContained` | Bundle the .NET runtime into the binary (~70 MB, no runtime needed on the machine). |
 | `-InstallDir <path>` | Install somewhere other than `%LOCALAPPDATA%\Programs\ws-search-mcp`. |
 | `-Yes` | Skip the prerequisite-install confirmation prompt (unattended use). |
@@ -94,10 +103,130 @@ Edit `~/.cursor/mcp.json` (user-scope) or `<project>/.cursor/mcp.json` (project-
 
 > **Windows JSON gotcha:** double-escape backslashes (`\\`) inside JSON strings, or use forward slashes. VS Code uses `servers`; Cursor and Copilot CLI use `mcpServers` — the key name is the most common copy-paste mistake.
 
+## Network hosting (HTTPS)
+
+`ws-search-mcp-http.exe` serves the same three tools to remote MCP clients over **HTTPS** (MCP Streamable HTTP, stateless). It is opt-in: the stdio server above is unaffected. Every request must carry `Authorization: Bearer <token>`; there is no plaintext HTTP listener and no remote credential-minting endpoint.
+
+### Quick start
+
+Run these as the Windows user whose search index you want to serve (see [constraints](#constraints-and-security-boundaries)):
+
+```powershell
+$bin = "$env:LOCALAPPDATA\Programs\ws-search-mcp"
+
+# 1. Create the server's TLS certificate (self-signed; add names clients will use to reach this machine)
+& "$bin\ws-search-mcp-admin.exe" cert init --san mybox.example.lan
+& "$bin\ws-search-mcp-admin.exe" cert export "$HOME\ws-search-server.pem"   # public cert only
+
+# 2. Mint a client (the token is printed ONCE, to stdout)
+& "$bin\ws-search-mcp-admin.exe" client mint "Work VS Code"
+
+# 3. Run the server (or install with -RegisterHttpTask to start it at every logon)
+& "$bin\ws-search-mcp-http.exe"                 # https on all interfaces, port 8765
+& "$bin\ws-search-mcp-http.exe" --port 9000 --bind 192.168.1.20
+```
+
+Copy `ws-search-server.pem` to each client machine and make the client trust it (below). Allow the port through the firewall for the networks you intend, e.g.:
+
+```powershell
+New-NetFirewallRule -DisplayName "ws-search-mcp-http" -Direction Inbound -Protocol TCP -LocalPort 8765 `
+    -Action Allow -Profile Private -RemoteAddress LocalSubnet
+```
+
+The server listens on **all interfaces** by default; use the firewall (or `--bind`) to control reachability.
+
+### `ws-search-mcp-admin`
+
+| Command | Purpose |
+|---------|---------|
+| `client mint <name> [--expires 365d\|never]` | Create a client. Prints its token once (progress goes to stderr, so `mint > token.txt` captures only the token). |
+| `client list [--json]` | List **current** (unrevoked) clients: name, created, expires (`EXPIRED` if past), last used, key fingerprint. |
+| `client revoke <name>` | Revoke a client; it is rejected within seconds, **no server restart needed**. |
+| `cert init [--san <dns-or-ip>]... [--force]` | Create the self-signed certificate. Default names: `localhost`, machine name, FQDN, `127.0.0.1`, `::1`, current IPs. |
+| `cert show` / `cert export <path.pem\|.cer>` | Inspect, or write the **public** certificate. |
+| `cert renew [--san ...]` | Replace the certificate (keeps its names unless `--san` is given). Restart the server and re-trust on clients. |
+| `cert use <thumbprint>` | Use a CA-issued certificate you imported into `CurrentUser\My` instead. |
+
+Client names are the human-friendly identifier: 1–64 characters (letters, digits, spaces, `-`, `_`, `.`), unique ignoring case.
+
+### How credentials work
+
+`client mint` generates a fresh P-256 key pair, signs a token (an ES256 JWT carrying the client name, audience and expiry; 365 days by default) with the private key, then **discards the private key**. Only the *public* key is kept, as a public-only certificate in `CurrentUser\WsSearchMcp.Clients` (inspect with `certmgr.msc`). The server therefore can verify tokens but can never forge one, and reading the server's storage yields nothing a client can present. Rotation = mint a new client, then revoke the old one. Treat the token itself as a password on the client side (an environment variable, not a checked-in file).
+
+The server's TLS private key is non-exportable and stays in `CurrentUser\My`. Configuration (`config.json`) and last-used timestamps (`usage.json`) live in `%APPDATA%\ws-search-mcp`, ACL'd to your user and SYSTEM. Set `WS_SEARCH_HOME` to relocate them.
+
+### Connecting clients
+
+Clients must (a) trust the certificate and (b) connect using a name in its list (`cert show`). Replace `mybox` and keep the token in `WS_SEARCH_TOKEN`.
+
+| Client | Status | How it trusts the self-signed cert |
+|--------|--------|------------------------------------|
+| Claude Code | **Tested** | `NODE_EXTRA_CA_CERTS=<path to .pem>` |
+| opencode | **Tested** | `NODE_EXTRA_CA_CERTS=<path to .pem>` — set where its *background service* sees it (see below) |
+| VS Code / Copilot | Not tested | Uses the Windows certificate store (import the cert, below) |
+| Copilot CLI, Cursor | Not tested | Try `NODE_EXTRA_CA_CERTS`, or the Windows store |
+| Claude.ai / Claude Desktop remote connectors | **Unsupported** | They require OAuth and a publicly trusted certificate |
+| Any local client | n/a | Keep using stdio (`ws-search-mcp.exe`) |
+
+**Claude Code**
+```powershell
+$env:NODE_EXTRA_CA_CERTS = "$HOME\ws-search-server.pem"     # persist with setx for future sessions
+$env:WS_SEARCH_TOKEN = "<token>"
+claude mcp add-json ws-search-net '{"type":"http","url":"https://mybox:8765/","headers":{"Authorization":"Bearer ${WS_SEARCH_TOKEN}"}}' --scope user
+```
+
+**opencode** (`opencode.jsonc`; servers live under `mcp.servers`)
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "ws-search": {
+        "type": "remote",
+        "url": "https://mybox:8765/",
+        "oauth": false,
+        "headers": { "Authorization": "Bearer {env:WS_SEARCH_TOKEN}" }
+      }
+    }
+  }
+}
+```
+- `"oauth": false` is **required**; opencode otherwise treats the server as OAuth and shows "needs authentication".
+- An unset `{env:...}` variable becomes an empty string and fails with a silent 401. Check it, or use `{file:~/path/to/token}`.
+- opencode runs MCP connections inside a shared **background service** that does not see environment variables set on a one-off command. Set `NODE_EXTRA_CA_CERTS` as a persistent user variable (`setx NODE_EXTRA_CA_CERTS "%USERPROFILE%\ws-search-server.pem"`), then run `opencode service restart`. (Verified with `opencode run --standalone`, whose private server inherits the shell environment; the persistent-variable route follows from that but was not separately exercised.) A failure to trust the cert shows as `UNABLE_TO_VERIFY_LEAF_SIGNATURE`. Do not "fix" it with `NODE_TLS_REJECT_UNAUTHORIZED=0`; that disables certificate checking entirely.
+
+**VS Code** (`mcp.json`, not tested)
+```json
+{
+  "inputs": [{ "type": "promptString", "id": "ws-search-token", "description": "ws-search token", "password": true }],
+  "servers": {
+    "ws-search-net": { "type": "http", "url": "https://mybox:8765/",
+      "headers": { "Authorization": "Bearer ${input:ws-search-token}" } }
+  }
+}
+```
+
+**Trusting the certificate in the Windows store** (for clients that use it; Windows shows a confirmation prompt):
+```powershell
+Import-Certificate -FilePath "$HOME\ws-search-server.pem" -CertStoreLocation Cert:\CurrentUser\Root
+```
+
+**Using your own CA instead:** have your CA issue a server certificate (with the names clients use, `serverAuth` usage), import it with its private key into `CurrentUser\My`, then `ws-search-mcp-admin cert use <thumbprint>`. Clients that already trust your CA need no further steps.
+
+### Constraints and security boundaries
+
+- **Run as the user whose index you want.** Windows Search security-trims results to the identity of the server process, so `ws-search-mcp-http.exe` runs as the signed-in user (a logon task, not a Windows service). It stops at sign-out. A service/SYSTEM account would see a different, or no, per-user scope; that is not supported.
+- **`ws-search-mcp-admin` must run as the same user** as the server (they share that user's certificate stores and `%APPDATA%`). Anyone who can run code as that user can mint clients; the Windows account is the trust boundary.
+- **Anyone with a valid token can search your whole index** (everything your user can see, including file names and indexed content). Scope tokens per device, set `--expires`, and revoke promptly.
+- The server rejects requests carrying a browser `Origin` header (allow-list in `config.json` → `allowedOrigins`, empty by default), limits bodies to 1 MB, and logs failed authentication with the caller's IP and a reason — never the token.
+- `install.ps1` stops running `ws-search-mcp*` processes before publishing, including a manually started HTTP server; with `-RegisterHttpTask` (or an existing task) it restarts the task afterwards.
+- The task shows a console window at logon. Windows Firewall will prompt on first listen unless you created a rule.
+
 ## Uninstall
 
 ```powershell
-./uninstall.ps1
+./uninstall.ps1               # removes binaries and the logon task; keeps your clients and certificate
+./uninstall.ps1 -RemoveData   # also deletes client keys, the server certificate and %APPDATA%\ws-search-mcp
 ```
 
 Removes the install directory. For each AI tool, also remove the server's entry:
@@ -111,7 +240,7 @@ Removes the install directory. For each AI tool, also remove the server's entry:
 
 ## Examples
 
-Once registered, an AI assistant can call the `search` tool with arguments like:
+Once registered, an AI assistant can call the `find_files` tool with arguments like:
 
 | Goal | Argument shape |
 |------|----------------|
@@ -122,7 +251,7 @@ Once registered, an AI assistant can call the `search` tool with arguments like:
 | Music tagged with a specific artist | `filters="[{\"property\":\"System.Music.Artist\",\"op\":\"CONTAINS\",\"value\":\"Radiohead\"}]"` |
 | "Which property holds the camera maker?" | `list_properties(filter:"camera")` |
 
-### `search` parameter reference
+### `find_files` parameter reference
 
 | Parameter | Purpose |
 |-----------|---------|
@@ -140,3 +269,5 @@ Once registered, an AI assistant can call the `search` tool with arguments like:
 dotnet build -c Release
 dotnet test
 ```
+
+Layout: `src/WsSearchMcp.Core` (tools + security library), `ws-search-mcp.csproj` (stdio exe), `src/WsSearchMcp.Http`, `src/WsSearchMcp.Admin`, `tests/WsSearchMcp.Tests`.

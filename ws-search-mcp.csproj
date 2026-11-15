@@ -10,18 +10,24 @@
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
 
-  <!-- Exclude accidental top-level build output folders from SDK's default compile glob -->
+  <!-- Exclude accidental top-level build output folders and the sibling projects from this project's compile glob -->
   <ItemGroup>
     <Compile Remove="Debug\**\*.cs" />
     <Compile Remove="Release\**\*.cs" />
     <Compile Remove="tests\**\*.cs" />
+    <Compile Remove="src\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.7" />
     <PackageReference Include="ModelContextProtocol" Version="1.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="src\WsSearchMcp.Core\WsSearchMcp.Core.csproj" />
   </ItemGroup>
 
 </Project>

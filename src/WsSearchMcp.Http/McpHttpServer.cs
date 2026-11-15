@@ -17,8 +17,17 @@ public sealed class McpHttpServerOptions
     /// <summary>TCP port; 8765 by default.</summary>
     public int Port { get; init; } = DefaultPort;
 
-    /// <summary>"any" (all interfaces, IPv4 + IPv6) or a specific IP address.</summary>
+    /// <summary>
+    /// "any" (all interfaces, IPv4 + IPv6), "localhost" (loopback only, IPv4 + IPv6), or a specific IP address.
+    /// </summary>
     public string Bind { get; init; } = "any";
+
+    /// <summary>True if <paramref name="bind"/> is "any", "localhost" or an IP address literal.</summary>
+    public static bool IsValidBind(string? bind) =>
+        bind is not null
+        && (bind.Equals("any", StringComparison.OrdinalIgnoreCase)
+            || bind.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || IPAddress.TryParse(bind, out _));
 
     /// <summary>Browser origins that may call the server. Empty by default: any request with an Origin header is rejected.</summary>
     public IReadOnlyCollection<string> AllowedOrigins { get; init; } = Array.Empty<string>();
@@ -50,8 +59,13 @@ public static class McpHttpServer
             kestrel.Limits.MaxRequestBodySize = McpHttpServerOptions.MaxRequestBodyBytes;
             void UseTls(ListenOptions lo) => lo.UseHttps(options.Certificate);
 
+            if (!McpHttpServerOptions.IsValidBind(options.Bind))
+                throw new ArgumentException($"Invalid bind '{options.Bind}': use 'any', 'localhost' or an IP address.", nameof(options));
+
             if (string.Equals(options.Bind, "any", StringComparison.OrdinalIgnoreCase))
                 kestrel.ListenAnyIP(options.Port, UseTls);
+            else if (string.Equals(options.Bind, "localhost", StringComparison.OrdinalIgnoreCase))
+                kestrel.ListenLocalhost(options.Port, UseTls); // 127.0.0.1 and ::1
             else
                 kestrel.Listen(IPAddress.Parse(options.Bind), options.Port, UseTls);
         });

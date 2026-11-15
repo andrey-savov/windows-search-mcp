@@ -199,3 +199,119 @@ public class HttpServerTests : IClassFixture<HttpServerFixture>
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, r.StatusCode);
     }
 }
+
+public class HttpServerBindTests
+{
+    [Theory]
+    [InlineData("any")]
+    [InlineData("ANY")]
+    [InlineData("localhost")]
+    [InlineData("LocalHost")]
+    [InlineData("127.0.0.1")]
+    [InlineData("0.0.0.0")]
+    [InlineData("::1")]
+    public void Valid_bind_values_are_accepted(string bind) => Assert.True(McpHttpServerOptions.IsValidBind(bind));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("  ")]
+    [InlineData("example.com")]
+    [InlineData("ultra")]
+    [InlineData("999.1.1.1")]
+    public void Other_bind_values_are_rejected(string? bind) => Assert.False(McpHttpServerOptions.IsValidBind(bind));
+
+    [Fact]
+    public async Task Invalid_bind_is_refused_when_building_the_server()
+    {
+        using var cert = MakeCert();
+        var options = new McpHttpServerOptions { Store = new InMemoryClientStore(), Certificate = cert, Port = FreePort(), Bind = "ultra" };
+        // The listener is configured when the host is built/started, so the error surfaces by then at the latest.
+        await Assert.ThrowsAnyAsync<ArgumentException>(async () =>
+        {
+            var app = McpHttpServer.Build(options);
+            await app.StartAsync();
+        });
+    }
+
+    [Fact]
+    public async Task Localhost_bind_answers_on_loopback_names_and_addresses()
+    {
+        using var cert = MakeCert();
+        var port = FreePort();
+        var app = McpHttpServer.Build(new McpHttpServerOptions
+        {
+            Store = new InMemoryClientStore(), Certificate = cert, Port = port, Bind = "localhost",
+        });
+        await app.StartAsync();
+        try
+        {
+            var thumb = cert.Thumbprint;
+            using var http = new HttpClient(new HttpClientHandler
+            {
+                ServerCertificateCustomValidationCallback = (_, c, _, _) => c?.Thumbprint == thumb,
+            }) { Timeout = TimeSpan.FromSeconds(10) };
+
+            var hosts = new List<string> { "localhost", "127.0.0.1" };
+            if (Socket.OSSupportsIPv6) hosts.Add("[::1]");
+            foreach (var host in hosts)
+            {
+                // No token: reaching the auth middleware (401) proves the TLS listener answered on that address.
+                var r = await http.GetAsync($"https://{host}:{port}/");
+                Assert.True(HttpStatusCode.Unauthorized == r.StatusCode, $"{host} returned {(int)r.StatusCode}");
+            }
+        }
+        finally
+        {
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Localhost_bind_is_not_reachable_via_a_non_loopback_address()
+    {
+        var external = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+            .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+            .Select(a => a.Address)
+            .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a));
+        if (external is null) return; // no network interface to probe from
+
+        using var cert = MakeCert();
+        var port = FreePort();
+        var app = McpHttpServer.Build(new McpHttpServerOptions
+        {
+            Store = new InMemoryClientStore(), Certificate = cert, Port = port, Bind = "localhost",
+        });
+        await app.StartAsync();
+        try
+        {
+            using var http = new HttpClient(new HttpClientHandler
+            {
+                ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
+            }) { Timeout = TimeSpan.FromSeconds(5) };
+            await Assert.ThrowsAnyAsync<HttpRequestException>(() => http.GetAsync($"https://{external}:{port}/"));
+        }
+        finally
+        {
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
+    }
+
+    private static X509Certificate2 MakeCert()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var ephemeral = CertificateManager.CreateSelfSigned(key, new[] { "localhost", "127.0.0.1", "::1" }, DateTimeOffset.UtcNow);
+        return X509CertificateLoader.LoadPkcs12(ephemeral.Export(X509ContentType.Pfx, "t"), "t");
+    }
+
+    private static int FreePort()
+    {
+        var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        return port;
+    }
+}

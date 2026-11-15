@@ -8,7 +8,8 @@ const string Usage = """
     Usage: ws-search-mcp-http [--port N] [--bind ADDR]
 
       --port N      TCP port (default 8765)
-      --bind ADDR   "any" (all interfaces, default) or a specific IP address
+      --bind ADDR   "any" (all interfaces, default), "localhost" (loopback only: 127.0.0.1 and ::1),
+                    or a specific IP address
 
     Run as the Windows user whose search index should be served. Manage clients and the TLS
     certificate with ws-search-mcp-admin.
@@ -28,9 +29,9 @@ for (var i = 0; i < args.Length; i++)
             break;
         case "--bind" when i + 1 < args.Length:
             bind = args[++i];
-            if (!bind.Equals("any", StringComparison.OrdinalIgnoreCase) && !IPAddress.TryParse(bind, out _))
+            if (!McpHttpServerOptions.IsValidBind(bind))
             {
-                Console.Error.WriteLine($"Invalid --bind address '{bind}'.");
+                Console.Error.WriteLine($"Invalid --bind '{bind}': use \"any\", \"localhost\" or an IP address.");
                 return 2;
             }
             break;

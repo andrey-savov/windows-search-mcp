@@ -124,6 +124,7 @@ $bin = "$env:LOCALAPPDATA\Programs\ws-search-mcp"
 # 3. Run the server (or install with -RegisterHttpTask to start it at every logon)
 & "$bin\ws-search-mcp-http.exe"                 # https on all interfaces, port 8765
 & "$bin\ws-search-mcp-http.exe" --port 9000 --bind 192.168.1.20
+& "$bin\ws-search-mcp-http.exe" --bind localhost   # this machine only (127.0.0.1 and ::1)
 ```
 
 Copy `ws-search-server.pem` to each client machine and make the client trust it (below). Allow the port through the firewall for the networks you intend, e.g.:
@@ -133,7 +134,7 @@ New-NetFirewallRule -DisplayName "ws-search-mcp-http" -Direction Inbound -Protoc
     -Action Allow -Profile Private -RemoteAddress LocalSubnet
 ```
 
-The server listens on **all interfaces** by default; use the firewall (or `--bind`) to control reachability.
+The server listens on **all interfaces** by default; use the firewall (or `--bind`) to control reachability. `--bind` accepts `any` (default), `localhost` (loopback only, IPv4 and IPv6) or an IP address; other host names are rejected.
 
 ### `ws-search-mcp-admin`
 
